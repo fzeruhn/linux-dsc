@@ -1620,7 +1620,7 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 	s32 hblank_symbols;
 	// number of link clocks per line.
 	int vblank_symbols	  = 0;
-	bool bEnableDsc = false;
+	bool bEnableDsc = outp->dp.dsc.supported;
 	unsigned surfaceWidth = asyh->mode.h.blanks - asyh->mode.h.blanke;
 	unsigned rasterWidth = asyh->mode.h.active;
 	unsigned depth = asyh->or.bpc * 3;
@@ -1638,6 +1638,43 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 	if (outp->outp.info.dp.increased_wm) {
 		watermarkAdjust = DP_CONFIG_INCREASED_WATERMARK_ADJUST;
 		watermarkMinimum = DP_CONFIG_INCREASED_WATERMARK_LIMIT;
+	}
+
+	// DSC: use GSP to calculate watermark
+	if (bEnableDsc) {
+		struct nouveau_dp_dsc_params dsc_params;
+		u32 minHBlank, effectiveBpp;
+		bool bIsModePossible;
+		int ret;
+
+		nouveau_dp_dsc_geometry(outp, &asyh->state.mode, &dsc_params);
+
+		ret = nvif_outp_dp_calc_imp(&outp->outp, head->base.index,
+					     dsc_params.slice_count,
+					     dsc_params.slice_width,
+					     dsc_params.slice_height,
+					     dsc_params.dsc_version_major,
+					     dsc_params.dsc_version_minor,
+					     outp->dp.link_bw,
+					     outp->dp.link_nr,
+					     enhancedFraming,
+					     rasterWidth,
+					     asyh->mode.v.active,
+					     surfaceWidth,
+					     asyh->mode.v.blanks - asyh->mode.v.blanke,
+					     depth,
+					     asyh->mode.clock,
+					     asyh->or.bpc,
+					     0, /* colorFormat */
+					     true, /* dsc_enabled */
+					     &waterMark, &tuSize, &minHBlank,
+					     &hBlankSym, &vBlankSym,
+					     &effectiveBpp, &bIsModePossible);
+		if (ret || !bIsModePossible)
+			return false;
+
+		return nvif_outp_dp_sst(&outp->outp, head->base.index,
+					 waterMark, hBlankSym, vBlankSym, tuSize);
 	}
 
 	if ((pixelClockHz * depth) >= (8 * minRate * outp->dp.link_nr * DSC_FACTOR))
@@ -1737,7 +1774,7 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 
 	vBlankSym = (vblank_symbols < 0) ? 0 : vblank_symbols;
 
-	return nvif_outp_dp_sst(&outp->outp, head->base.index, waterMark, hBlankSym, vBlankSym);
+	return nvif_outp_dp_sst(&outp->outp, head->base.index, waterMark, hBlankSym, vBlankSym, tuSize);
 }
 
 static void

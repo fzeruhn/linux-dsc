@@ -76,7 +76,8 @@ nvif_outp_dp_mst_id_get(struct nvif_outp *outp, u32 *id)
 }
 
 int
-nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym, u32 vblanksym)
+nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym,
+		 u32 vblanksym, u32 tusize)
 {
 	struct nvif_outp_dp_sst_v0 args;
 	int ret;
@@ -86,11 +87,67 @@ nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym,
 	args.watermark = watermark;
 	args.hblanksym = hblanksym;
 	args.vblanksym = vblanksym;
+	args.tusize = tusize;
 	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_SST, &args, sizeof(args));
 	NVIF_ERRON(ret, &outp->object,
-		   "[DP_SST head:%d watermark:%d hblanksym:%d vblanksym:%d]",
-		   args.head, args.watermark, args.hblanksym, args.vblanksym);
+		   "[DP_SST head:%d watermark:%d hblanksym:%d vblanksym:%d tusize:%d]",
+		   args.head, args.watermark, args.hblanksym, args.vblanksym, args.tusize);
 	return ret;
+}
+
+int
+nvif_outp_dp_calc_imp(struct nvif_outp *outp, int head,
+		      u32 slice_count, u32 slice_width, u32 slice_height,
+		      u32 dsc_version_major, u32 dsc_version_minor,
+		      u32 link_rate_10m, u32 lane_count, bool enhanced_framing,
+		      u32 raster_width, u32 raster_height,
+		      u32 surface_width, u32 surface_height,
+		      u32 depth, u32 pixel_frequency_khz,
+		      u32 bits_per_component, u32 color_format,
+		      bool dsc_enabled,
+		      u32 *water_mark, u32 *tu_size, u32 *min_h_blank,
+		      u32 *h_blank_sym, u32 *v_blank_sym, u32 *effective_bpp,
+		      bool *b_is_mode_possible)
+{
+	struct nvif_outp_dp_calc_imp_v0 args;
+	int ret;
+
+	args.version = 0;
+	args.head = head;
+	args.slice_count = slice_count;
+	args.slice_width = slice_width;
+	args.slice_height = slice_height;
+	args.dsc_version_major = dsc_version_major;
+	args.dsc_version_minor = dsc_version_minor;
+	args.link_rate_10m = link_rate_10m;
+	args.lane_count = lane_count;
+	args.b_enhanced_framing = enhanced_framing;
+	args.raster_width = raster_width;
+	args.raster_height = raster_height;
+	args.surface_width = surface_width;
+	args.surface_height = surface_height;
+	args.depth = depth;
+	args.pixel_frequency_khz = pixel_frequency_khz;
+	args.bits_per_component = bits_per_component;
+	args.color_format = color_format;
+	args.b_dsc_enabled = dsc_enabled;
+
+	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_CALC_IMP, &args, sizeof(args));
+	NVIF_ERRON(ret, &outp->object,
+		   "[DP_CALC_IMP head:%d slices:%d water_mark:%d tu_size:%d possible:%d]",
+		   args.head, args.slice_count, args.water_mark, args.tu_size,
+		   args.b_is_mode_possible);
+	if (ret)
+		return ret;
+
+	*water_mark = args.water_mark;
+	*tu_size = args.tu_size;
+	*min_h_blank = args.min_h_blank;
+	*h_blank_sym = args.h_blank_sym;
+	*v_blank_sym = args.v_blank_sym;
+	*effective_bpp = args.effective_bpp;
+	*b_is_mode_possible = args.b_is_mode_possible;
+	return 0;
 }
 
 int

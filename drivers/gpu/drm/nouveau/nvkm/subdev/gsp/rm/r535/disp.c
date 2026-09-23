@@ -442,7 +442,7 @@ r535_sor_dp_vcpi(struct nvkm_ior *sor, int head, u8 slot, u8 slot_nr, u16 pbn, u
 
 static int
 r535_dp_sst(struct nvkm_ior *sor, int head, bool ef,
-	    u32 watermark, u32 hblanksym, u32 vblanksym)
+	    u32 watermark, u32 hblanksym, u32 vblanksym, u32 tusize)
 {
 	struct nvkm_disp *disp = sor->disp;
 	struct NV0073_CTRL_CMD_DP_CONFIG_STREAM_PARAMS *ctrl;
@@ -463,7 +463,7 @@ r535_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 	ctrl->colorFormat = 0;
 	ctrl->bEnableTwoHeadOneOr = 0;
 	ctrl->SST.bEnhancedFraming = ef;
-	ctrl->SST.tuSize = 64;
+	ctrl->SST.tuSize = tusize;
 	ctrl->SST.waterMark = watermark;
 	ctrl->SST.bEnableAudioOverRightPanel = 0;
 	return nvkm_gsp_rm_ctrl_wr(&disp->rm.objcom, ctrl);
@@ -471,11 +471,11 @@ r535_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 
 static int
 r535_sor_dp_sst(struct nvkm_ior *sor, int head, bool ef,
-		u32 watermark, u32 hblanksym, u32 vblanksym)
+		u32 watermark, u32 hblanksym, u32 vblanksym, u32 tusize)
 {
 	const struct nvkm_rm_api *rmapi = sor->disp->engine.subdev.device->gsp->rm->api;
 
-	return rmapi->disp->dp.sst(sor, head, ef, watermark, hblanksym, vblanksym);
+	return rmapi->disp->dp.sst(sor, head, ef, watermark, hblanksym, vblanksym, tusize);
 }
 
 static const struct nvkm_ior_func_dp

@@ -109,7 +109,7 @@ r570_dp_vcpi(struct nvkm_ior *sor, int head, u8 slot, u8 slot_nr, u16 pbn, u16 a
 
 static int
 r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
-	    u32 watermark, u32 hblanksym, u32 vblanksym)
+	    u32 watermark, u32 hblanksym, u32 vblanksym, u32 tusize)
 {
 	struct nvkm_disp *disp = sor->disp;
 	NV0073_CTRL_CMD_DP_CONFIG_STREAM_PARAMS *ctrl;
@@ -130,7 +130,7 @@ r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 	ctrl->colorFormat = 0;
 	ctrl->bEnableTwoHeadOneOr = 0;
 	ctrl->SST.bEnhancedFraming = ef;
-	ctrl->SST.tuSize = 64;
+	ctrl->SST.tuSize = tusize;
 	ctrl->SST.waterMark = watermark;
 	ctrl->SST.bEnableAudioOverRightPanel = 0;
 	return nvkm_gsp_rm_ctrl_wr(&disp->rm.objcom, ctrl);

@@ -108,7 +108,20 @@ int nvif_outp_dp_train(struct nvif_outp *, u8 dpcd[DP_RECEIVER_CAP_SIZE],
 		       u8 lttprs, u8 link_nr, u32 link_bw, bool mst, bool post_lt_adj,
 		       bool retrain);
 int nvif_outp_dp_drive(struct nvif_outp *, u8 link_nr, u8 pe[4], u8 vs[4]);
-int nvif_outp_dp_sst(struct nvif_outp *, int head, u32 watermark, u32 hblanksym, u32 vblanksym);
+int nvif_outp_dp_sst(struct nvif_outp *, int head, u32 watermark, u32 hblanksym,
+		     u32 vblanksym, u32 tusize);
+int nvif_outp_dp_calc_imp(struct nvif_outp *, int head,
+			  u32 slice_count, u32 slice_width, u32 slice_height,
+			  u32 dsc_version_major, u32 dsc_version_minor,
+			  u32 link_rate_10m, u32 lane_count, bool enhanced_framing,
+			  u32 raster_width, u32 raster_height,
+			  u32 surface_width, u32 surface_height,
+			  u32 depth, u32 pixel_frequency_khz,
+			  u32 bits_per_component, u32 color_format,
+			  bool dsc_enabled,
+			  u32 *water_mark, u32 *tu_size, u32 *min_h_blank,
+			  u32 *h_blank_sym, u32 *v_blank_sym, u32 *effective_bpp,
+			  bool *b_is_mode_possible);
 int nvif_outp_dp_mst_id_get(struct nvif_outp *, u32 *id);
 int nvif_outp_dp_mst_id_put(struct nvif_outp *, u32 id);
 int nvif_outp_dp_mst_vcpi(struct nvif_outp *, int head,

@@ -69,6 +69,7 @@ union nvif_outp_args {
 #define NVIF_OUTP_V0_DP_MST_ID_GET 0x76
 #define NVIF_OUTP_V0_DP_MST_ID_PUT 0x77
 #define NVIF_OUTP_V0_DP_MST_VCPI   0x78
+#define NVIF_OUTP_V0_DP_CALC_IMP   0x79
 
 union nvif_outp_detect_args {
 	struct nvif_outp_detect_v0 {
@@ -262,6 +263,46 @@ union nvif_outp_dp_sst_args {
 		__u32 watermark;
 		__u32 hblanksym;
 		__u32 vblanksym;
+		__u32 tusize;
+	} v0;
+};
+
+union nvif_outp_dp_calc_imp_args {
+	struct nvif_outp_dp_calc_imp_v0 {
+		__u8  version;
+		__u8  head;
+		__u8  pad02[2];
+		/* DSC params */
+		__u32 slice_count;
+		__u32 slice_width;
+		__u32 slice_height;
+		__u32 dsc_version_major;
+		__u32 dsc_version_minor;
+		/* Link config */
+		__u32 link_rate_10m;
+		__u32 lane_count;
+		__u8  b_enhanced_framing;
+		__u8  pad03[3];
+		/* Modeset info */
+		__u32 raster_width;
+		__u32 raster_height;
+		__u32 surface_width;
+		__u32 surface_height;
+		__u32 depth;
+		__u32 pixel_frequency_khz;
+		__u32 bits_per_component;
+		__u32 color_format;
+		__u8  b_dsc_enabled;
+		__u8  pad04[3];
+		/* Watermark (output) */
+		__u32 water_mark;
+		__u32 tu_size;
+		__u32 min_h_blank;
+		__u32 h_blank_sym;
+		__u32 v_blank_sym;
+		__u32 effective_bpp;
+		__u8  b_is_mode_possible;
+		__u8  pad05[3];
 	} v0;
 };
 
