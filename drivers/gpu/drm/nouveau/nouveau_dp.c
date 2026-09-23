@@ -585,13 +585,20 @@ nv50_dp_mode_valid(struct nouveau_encoder *outp,
 	 * In particlar not doing this causes modes to be dropped on HDR
 	 * displays as we might check with a bpc of 16 even.
 	 */
-	const u8 bpp = 6 * 3;
+	u8 bpp = 6 * 3;
 
 	if (mode->flags & DRM_MODE_FLAG_INTERLACE && !outp->caps.dp_interlace)
 		return MODE_NO_INTERLACE;
 
 	if ((mode->flags & DRM_MODE_FLAG_3D_MASK) == DRM_MODE_FLAG_3D_FRAME_PACKING)
 		clock *= 2;
+
+	/* When DSC is supported, use effective bpp (compressed) for bandwidth check.
+	 * DSC 1.2 typically compresses ~3:1, so 18 bpp → 6 bpp.
+	 * The GSP will do final validation via CALCULATE_DP_IMP during mode set.
+	 */
+	if (outp->dp.dsc.supported)
+		bpp = 6;
 
 	max_rate = outp->dp.link_nr * outp->dp.link_bw;
 	mode_rate = DIV_ROUND_UP(clock * bpp, 8);
