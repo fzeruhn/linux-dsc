@@ -137,6 +137,30 @@ r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 }
 
 static int
+r570_dp_calc_imp(struct nvkm_disp *disp, NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *params)
+{
+	NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *ctrl;
+	int ret;
+
+	ctrl = nvkm_gsp_rm_ctrl_get(&disp->rm.objcom,
+				    NV0073_CTRL_CMD_CALCULATE_DP_IMP, sizeof(*ctrl));
+	if (IS_ERR(ctrl))
+		return PTR_ERR(ctrl);
+
+	*ctrl = *params;
+
+	ret = nvkm_gsp_rm_ctrl_push(&disp->rm.objcom, &ctrl, sizeof(*ctrl));
+	if (ret) {
+		nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
+		return ret;
+	}
+
+	params->watermark = ctrl->watermark;
+	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
+	return 0;
+}
+
+static int
 r570_dp_set_indexed_link_rates(struct nvkm_outp *outp)
 {
 	NV0073_CTRL_CMD_DP_CONFIG_INDEXED_LINK_RATES_PARAMS *ctrl;
@@ -319,6 +343,7 @@ r570_disp = {
 		.set_indexed_link_rates = r570_dp_set_indexed_link_rates,
 		.sst = r570_dp_sst,
 		.vcpi = r570_dp_vcpi,
+		.calc_imp = r570_dp_calc_imp,
 	},
 	.chan = {
 		.set_pushbuf = r570_disp_chan_set_pushbuf,

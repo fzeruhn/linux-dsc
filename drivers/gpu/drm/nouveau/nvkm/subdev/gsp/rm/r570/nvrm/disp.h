@@ -290,6 +290,62 @@ typedef struct NV0073_CTRL_CMD_DP_CONFIG_STREAM_PARAMS {
     } SST;
 } NV0073_CTRL_CMD_DP_CONFIG_STREAM_PARAMS;
 
+#define NV0073_CTRL_CMD_CALCULATE_DP_IMP (0x73138cU) /* finn: Evaluated from "(FINN_NV04_DISPLAY_COMMON_DP_INTERFACE_ID << 8) | NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS_MESSAGE_ID" */
+
+typedef struct NV0073_CTRL_DP_IMP_LINK_CONFIGURATION {
+    NvU32  linkRate10M;
+    NvU32  laneCount;
+    NvBool bEnhancedFraming;
+    NvBool bDp2xChannelCoding;
+    NvBool bMultiStreamTopology;
+    NvBool bFECEnabled;
+    NvBool bDisableEffBppSST8b10b;
+} NV0073_CTRL_DP_IMP_LINK_CONFIGURATION;
+
+typedef struct NV0073_CTRL_DP_IMP_DSC_PARAMETERS {
+    NvU32 sliceCount;
+    NvU32 sliceWidth;
+    NvU32 sliceHeight;
+    NvU32 dscVersionMajor;
+    NvU32 dscVersionMinor;
+} NV0073_CTRL_DP_IMP_DSC_PARAMETERS;
+
+typedef struct NV0073_CTRL_DP_IMP_MODESET_DATA {
+    NvU32  rasterWidth;
+    NvU32  rasterHeight;
+    NvU32  surfaceWidth;
+    NvU32  surfaceHeight;
+    NvU32  rasterBlankStartX;
+    NvU32  rasterBlankEndX;
+    NvU32  depth;
+    NvU32  twoChannelAudioHz;
+    NvU32  eightChannelAudioHz;
+    NvU32  pixelFrequencyKHz;
+    NvU32  bitsPerComponent;
+    NvU32  colorFormat;
+    NvBool bDSCEnabled;
+} NV0073_CTRL_DP_IMP_MODESET_DATA;
+
+typedef struct NV0073_CTRL_DP_IMP_WATERMARK {
+    NvU32  waterMark;
+    NvU32  tuSize;
+    NvU32  minHBlank;
+    NvU32  hBlankSym;
+    NvU32  vBlankSym;
+    NvU32  effectiveBpp;
+    NvBool bIsModePossible;
+} NV0073_CTRL_DP_IMP_WATERMARK;
+
+typedef struct NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS {
+    NvU32                                 subDeviceInstance;
+    NvU32                                 displayId;
+    NvU32                                 headIndex;
+    NV0073_CTRL_DP_IMP_LINK_CONFIGURATION linkConfig;
+    NV0073_CTRL_DP_IMP_MODESET_DATA       modesetInfo;
+    NV0073_CTRL_DP_IMP_DSC_PARAMETERS     dscInfo;
+    NV0073_CTRL_DP_IMP_WATERMARK          watermark;
+} NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS;
+
 #define NV0073_CTRL_CMD_DP_SET_AUDIO_MUTESTREAM             (0x731359U) /* finn: Evaluated from "(FINN_NV04_DISPLAY_COMMON_DP_INTERFACE_ID << 8) | NV0073_CTRL_DP_SET_AUDIO_MUTESTREAM_PARAMS_MESSAGE_ID" */
 typedef struct NV0073_CTRL_DP_SET_AUDIO_MUTESTREAM_PARAMS {
     NvU32 subDeviceInstance;

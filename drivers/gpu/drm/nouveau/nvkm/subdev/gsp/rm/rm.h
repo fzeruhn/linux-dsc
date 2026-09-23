@@ -9,6 +9,7 @@
 struct nvkm_ior;
 struct nvkm_outp;
 struct r535_gr;
+struct NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS;
 
 struct nvkm_rm_impl {
 	const struct nvkm_rm_wpr *wpr;
@@ -98,6 +99,8 @@ struct nvkm_rm_api {
 				   u32 watermark, u32 hblanksym, u32 vblanksym);
 			int (*vcpi)(struct nvkm_ior *, int head,
 				    u8 slot, u8 slot_nr, u16 pbn, u16 aligned_pbn);
+			int (*calc_imp)(struct nvkm_disp *,
+					struct NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *);
 		} dp;
 
 		struct {
