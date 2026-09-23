@@ -125,6 +125,20 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 		}
 	}
 
+	/* DSC sink caps (DP 1.4+), DPCD 0x60-0x6F */
+	if (dpcd[DP_DPCD_REV] >= 0x14) {
+		u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE];
+
+		ret = drm_dp_dpcd_read(aux, DP_DSC_SUPPORT, dsc_dpcd,
+					sizeof(dsc_dpcd));
+		if (ret == sizeof(dsc_dpcd)) {
+			memcpy(outp->dp.dsc.dsc_dpcd, dsc_dpcd,
+			       sizeof(dsc_dpcd));
+			outp->dp.dsc.supported =
+				drm_dp_sink_supports_dsc(dsc_dpcd);
+		}
+	}
+
 	if (!outp->dp.rate_nr) {
 		const u32 rates[] = { 810000, 540000, 270000, 162000 };
 		u32 max_rate = dpcd[DP_MAX_LINK_RATE] * 27000;
@@ -517,6 +531,43 @@ nouveau_dp_irq(struct work_struct *work)
 	mutex_unlock(&outp->dp.hpd_irq_lock);
 
 	nouveau_connector_hpd(nv_connector, NVIF_CONN_EVENT_V0_IRQ | hpd);
+}
+
+/* Pick DSC geometry for a mode given the sink's DSC caps. */
+void
+nouveau_dp_dsc_geometry(struct nouveau_encoder *outp,
+			const struct drm_display_mode *mode,
+			struct nouveau_dp_dsc_params *params)
+{
+	const u32 raster_width = mode->hdisplay;
+	const u32 raster_height = mode->vdisplay;
+	const u32 max_slice_width =
+		drm_dp_dsc_sink_max_slice_width(outp->dp.dsc.dsc_dpcd);
+	const u32 mask =
+		drm_dp_dsc_sink_slice_count_mask(outp->dp.dsc.dsc_dpcd, false);
+	u32 min_count, slice_count;
+
+	params->dsc_version_major = 1;
+	params->dsc_version_minor = 2;
+	params->slice_height = raster_height;
+
+	/* Smallest slice count that keeps the slice width within the max. */
+	min_count = max_slice_width ?
+		    DIV_ROUND_UP(raster_width, max_slice_width) : 1;
+
+	/* Round up to the next slice count the sink advertises. */
+	slice_count = 0;
+	for (u32 count = min_count; count <= 24; count++) {
+		if (mask & drm_dp_dsc_slice_count_to_mask(count)) {
+			slice_count = count;
+			break;
+		}
+	}
+	if (!slice_count)
+		slice_count = min_count;
+
+	params->slice_count = slice_count;
+	params->slice_width = DIV_ROUND_UP(raster_width, slice_count);
 }
 
 /* TODO:

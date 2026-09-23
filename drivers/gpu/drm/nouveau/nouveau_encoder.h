@@ -84,6 +84,12 @@ struct nouveau_encoder {
 
 			u8 dpcd[DP_RECEIVER_CAP_SIZE];
 
+			/* DSC sink caps, read from DPCD 0x60-0x6F */
+			struct {
+				u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE];
+				bool supported;
+			} dsc;
+
 			struct nvif_outp_dp_rate rate[8];
 			int rate_nr;
 
@@ -154,6 +160,19 @@ enum nouveau_dp_status {
 	NOUVEAU_DP_SST,
 	NOUVEAU_DP_MST,
 };
+
+/* DSC geometry for a mode */
+struct nouveau_dp_dsc_params {
+	u32 slice_count;
+	u32 slice_width;
+	u32 slice_height;
+	u32 dsc_version_major;
+	u32 dsc_version_minor;
+};
+
+void nouveau_dp_dsc_geometry(struct nouveau_encoder *,
+			     const struct drm_display_mode *,
+			     struct nouveau_dp_dsc_params *);
 
 int nouveau_dp_detect(struct nouveau_connector *, struct nouveau_encoder *);
 bool nouveau_dp_train(struct nouveau_encoder *, bool mst, u32 khz, u8 bpc);
