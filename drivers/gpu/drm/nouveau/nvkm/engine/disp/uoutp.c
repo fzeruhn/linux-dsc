@@ -98,7 +98,7 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	union nvif_outp_dp_calc_imp_args *args = argv;
 	struct nvkm_disp *disp = outp->disp;
 	struct nvkm_ior *ior = outp->ior;
-	NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS params;
+	struct nvkm_dp_calc_imp params;
 	int ret;
 
 	if (argc != sizeof(args->v0) || args->v0.version != 0)
@@ -109,38 +109,36 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 		return -EINVAL;
 
 	memset(&params, 0, sizeof(params));
-	params.subDeviceInstance = 0;
-	params.displayId = BIT(args->v0.head);
-	params.headIndex = args->v0.head;
-	params.linkConfig.linkRate10M = args->v0.link_rate_10m;
-	params.linkConfig.laneCount = args->v0.lane_count;
-	params.linkConfig.bEnhancedFraming = args->v0.b_enhanced_framing;
-	params.modesetInfo.rasterWidth = args->v0.raster_width;
-	params.modesetInfo.rasterHeight = args->v0.raster_height;
-	params.modesetInfo.surfaceWidth = args->v0.surface_width;
-	params.modesetInfo.surfaceHeight = args->v0.surface_height;
-	params.modesetInfo.depth = args->v0.depth;
-	params.modesetInfo.pixelFrequencyKHz = args->v0.pixel_frequency_khz;
-	params.modesetInfo.bitsPerComponent = args->v0.bits_per_component;
-	params.modesetInfo.colorFormat = args->v0.color_format;
-	params.modesetInfo.bDSCEnabled = args->v0.b_dsc_enabled;
-	params.dscInfo.sliceCount = args->v0.slice_count;
-	params.dscInfo.sliceWidth = args->v0.slice_width;
-	params.dscInfo.sliceHeight = args->v0.slice_height;
-	params.dscInfo.dscVersionMajor = args->v0.dsc_version_major;
-	params.dscInfo.dscVersionMinor = args->v0.dsc_version_minor;
+	params.head = args->v0.head;
+	params.slice_count = args->v0.slice_count;
+	params.slice_width = args->v0.slice_width;
+	params.slice_height = args->v0.slice_height;
+	params.dsc_version_major = args->v0.dsc_version_major;
+	params.dsc_version_minor = args->v0.dsc_version_minor;
+	params.link_rate_10m = args->v0.link_rate_10m;
+	params.lane_count = args->v0.lane_count;
+	params.b_enhanced_framing = args->v0.b_enhanced_framing;
+	params.raster_width = args->v0.raster_width;
+	params.raster_height = args->v0.raster_height;
+	params.surface_width = args->v0.surface_width;
+	params.surface_height = args->v0.surface_height;
+	params.depth = args->v0.depth;
+	params.pixel_frequency_khz = args->v0.pixel_frequency_khz;
+	params.bits_per_component = args->v0.bits_per_component;
+	params.color_format = args->v0.color_format;
+	params.b_dsc_enabled = args->v0.b_dsc_enabled;
 
 	ret = ior->func->dp->calc_imp(disp, &params);
 	if (ret)
 		return ret;
 
-	args->v0.water_mark = params.watermark.waterMark;
-	args->v0.tu_size = params.watermark.tuSize;
-	args->v0.min_h_blank = params.watermark.minHBlank;
-	args->v0.h_blank_sym = params.watermark.hBlankSym;
-	args->v0.v_blank_sym = params.watermark.vBlankSym;
-	args->v0.effective_bpp = params.watermark.effectiveBpp;
-	args->v0.b_is_mode_possible = params.watermark.bIsModePossible;
+	args->v0.water_mark = params.water_mark;
+	args->v0.tu_size = params.tu_size;
+	args->v0.min_h_blank = params.min_h_blank;
+	args->v0.h_blank_sym = params.h_blank_sym;
+	args->v0.v_blank_sym = params.v_blank_sym;
+	args->v0.effective_bpp = params.effective_bpp;
+	args->v0.b_is_mode_possible = params.b_is_mode_possible;
 	return 0;
 }
 

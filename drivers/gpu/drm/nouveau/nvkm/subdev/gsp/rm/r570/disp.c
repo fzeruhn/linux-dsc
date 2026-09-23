@@ -137,7 +137,7 @@ r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 }
 
 static int
-r570_dp_calc_imp(struct nvkm_disp *disp, NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *params)
+r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 {
 	NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *ctrl;
 	int ret;
@@ -147,7 +147,26 @@ r570_dp_calc_imp(struct nvkm_disp *disp, NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS
 	if (IS_ERR(ctrl))
 		return PTR_ERR(ctrl);
 
-	*ctrl = *params;
+	ctrl->subDeviceInstance = 0;
+	ctrl->displayId = BIT(params->head);
+	ctrl->headIndex = params->head;
+	ctrl->linkConfig.linkRate10M = params->link_rate_10m;
+	ctrl->linkConfig.laneCount = params->lane_count;
+	ctrl->linkConfig.bEnhancedFraming = params->b_enhanced_framing;
+	ctrl->modesetInfo.rasterWidth = params->raster_width;
+	ctrl->modesetInfo.rasterHeight = params->raster_height;
+	ctrl->modesetInfo.surfaceWidth = params->surface_width;
+	ctrl->modesetInfo.surfaceHeight = params->surface_height;
+	ctrl->modesetInfo.depth = params->depth;
+	ctrl->modesetInfo.pixelFrequencyKHz = params->pixel_frequency_khz;
+	ctrl->modesetInfo.bitsPerComponent = params->bits_per_component;
+	ctrl->modesetInfo.colorFormat = params->color_format;
+	ctrl->modesetInfo.bDSCEnabled = params->b_dsc_enabled;
+	ctrl->dscInfo.sliceCount = params->slice_count;
+	ctrl->dscInfo.sliceWidth = params->slice_width;
+	ctrl->dscInfo.sliceHeight = params->slice_height;
+	ctrl->dscInfo.dscVersionMajor = params->dsc_version_major;
+	ctrl->dscInfo.dscVersionMinor = params->dsc_version_minor;
 
 	ret = nvkm_gsp_rm_ctrl_push(&disp->rm.objcom, &ctrl, sizeof(*ctrl));
 	if (ret) {
@@ -155,7 +174,13 @@ r570_dp_calc_imp(struct nvkm_disp *disp, NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS
 		return ret;
 	}
 
-	params->watermark = ctrl->watermark;
+	params->water_mark = ctrl->watermark.waterMark;
+	params->tu_size = ctrl->watermark.tuSize;
+	params->min_h_blank = ctrl->watermark.minHBlank;
+	params->h_blank_sym = ctrl->watermark.hBlankSym;
+	params->v_blank_sym = ctrl->watermark.vBlankSym;
+	params->effective_bpp = ctrl->watermark.effectiveBpp;
+	params->b_is_mode_possible = ctrl->watermark.bIsModePossible;
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }

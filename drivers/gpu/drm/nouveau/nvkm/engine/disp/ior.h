@@ -4,6 +4,38 @@
 #include "priv.h"
 struct nvkm_i2c_aux;
 
+struct nvkm_dp_calc_imp {
+	int    head;
+	/* DSC params */
+	u32    slice_count;
+	u32    slice_width;
+	u32    slice_height;
+	u32    dsc_version_major;
+	u32    dsc_version_minor;
+	/* Link config */
+	u32    link_rate_10m;
+	u32    lane_count;
+	bool   b_enhanced_framing;
+	/* Modeset info */
+	u32    raster_width;
+	u32    raster_height;
+	u32    surface_width;
+	u32    surface_height;
+	u32    depth;
+	u32    pixel_frequency_khz;
+	u32    bits_per_component;
+	u32    color_format;
+	bool   b_dsc_enabled;
+	/* Watermark (out) */
+	u32    water_mark;
+	u32    tu_size;
+	u32    min_h_blank;
+	u32    h_blank_sym;
+	u32    v_blank_sym;
+	u32    effective_bpp;
+	bool   b_is_mode_possible;
+};
+
 struct nvkm_ior {
 	const struct nvkm_ior_func *func;
 	struct nvkm_disp *disp;
@@ -87,6 +119,7 @@ struct nvkm_ior_func {
 		int (*sst)(struct nvkm_ior *, int head, bool ef,
 			   u32 watermark, u32 hblanksym, u32 vblanksym,
 			   u32 tusize);
+		int (*calc_imp)(struct nvkm_disp *, struct nvkm_dp_calc_imp *);
 		void (*vcpi)(struct nvkm_ior *, int head, u8 slot,
 			     u8 slot_nr, u16 pbn, u16 aligned);
 		void (*audio)(struct nvkm_ior *, int head, bool enable);

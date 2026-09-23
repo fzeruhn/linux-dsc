@@ -478,9 +478,18 @@ r535_sor_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 	return rmapi->disp->dp.sst(sor, head, ef, watermark, hblanksym, vblanksym, tusize);
 }
 
+static int
+r535_sor_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
+{
+	const struct nvkm_rm_api *rmapi = disp->engine.subdev.device->gsp->rm->api;
+
+	return rmapi->disp->dp.calc_imp(disp, params);
+}
+
 static const struct nvkm_ior_func_dp
 r535_sor_dp = {
 	.sst = r535_sor_dp_sst,
+	.calc_imp = r535_sor_dp_calc_imp,
 	.vcpi = r535_sor_dp_vcpi,
 	.audio = r535_sor_dp_audio,
 };
