@@ -125,7 +125,14 @@ struct nv50_head_atom {
 		 * implemented: PPS, HEAD_SET_DSC_*, sink DP_DSC_ENABLE)
 		 */
 		bool dsc;
+		/* tiles the output needs (DSC above HEAD_CLK_CAP) */
+		u8 tiles;
 	} or;
+
+	/* tiles the head scans out through (coreca7d_tile_set()) */
+	struct {
+		u8 count;
+	} tile;
 
 	/* PPS contents when or.dsc, from nv50_outp_atomic_check_dsc() */
 	struct drm_dsc_config dsc;

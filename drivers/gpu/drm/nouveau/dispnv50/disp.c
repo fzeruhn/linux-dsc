@@ -229,6 +229,10 @@ MODULE_PARM_DESC(kms_vram_pushbuf, "Place EVO/NVD push buffers in VRAM (default:
 static int nv50_dmac_vram_pushbuf = -1;
 module_param_named(kms_vram_pushbuf, nv50_dmac_vram_pushbuf, int, 0400);
 
+MODULE_PARM_DESC(force_tiles, "Scan out through this many tiles (max 2) on each head, from its next modeset (GB20x, debug)");
+int nv50_force_tiles;
+module_param_named(force_tiles, nv50_force_tiles, int, 0644);
+
 int
 nv50_dmac_create(struct nouveau_drm *drm,
 		 const s32 *oclass, u8 head, void *data, u32 size, s64 syncbuf,
@@ -510,6 +514,7 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	int ret;
 
 	asyh->or.dsc = false;
+	asyh->or.tiles = 1;
 
 	if (outp->dcb->type != DCB_OUTPUT_DP || !crtc_state->enable)
 		return 0;
@@ -2348,6 +2353,52 @@ nv50_disp_atomic_commit_wndw(struct drm_atomic_commit *state, u32 *interlock)
 	}
 }
 
+/* Tiles a head scans out through; a disabled head goes back to one. */
+static int
+nv50_disp_tiles(struct drm_crtc_state *crtc_state)
+{
+	if (!crtc_state->active)
+		return 1;
+
+	return max_t(int, nv50_head_atom(crtc_state)->tile.count, 1);
+}
+
+/* Tiles and activity of heads 0-3 as committed; crtc->state is already the
+ * new state for the crtcs in the commit being applied.
+ */
+static void
+nv50_disp_tile_state(struct drm_device *dev, int *ntiles, bool *active)
+{
+	struct drm_crtc *crtc;
+
+	for (int i = 0; i < 4; i++) {
+		ntiles[i] = 1;
+		active[i] = false;
+	}
+
+	drm_for_each_crtc(crtc, dev) {
+		const int i = nv50_head(crtc)->base.index;
+
+		if (i < 4) {
+			ntiles[i] = nv50_disp_tiles(crtc->state);
+			active[i] = crtc->state->active;
+		}
+	}
+}
+
+/* Width of the first of ntiles tiles: whole DSC slices, as many as the other
+ * tiles or one more (GetTileWidth()), else an even split.
+ */
+static u16
+nv50_disp_tile_width0(struct nv50_head_atom *asyh, int ntiles)
+{
+	if (asyh->or.dsc)
+		return DIV_ROUND_UP(asyh->dsc.slice_count, ntiles) *
+		       asyh->dsc.slice_width;
+
+	return DIV_ROUND_UP(asyh->state.adjusted_mode.hdisplay, ntiles);
+}
+
 static void
 nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 {
@@ -2364,6 +2415,8 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	int i;
 	bool flushed = false;
+	int ntiles[4];
+	bool active[4];
 
 	NV_ATOMIC(drm, "commit %d %d\n", atom->lock_core, atom->flush_disable);
 	nv50_crc_atomic_stop_reporting(state);
@@ -2375,6 +2428,35 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 
 	if (atom->lock_core)
 		mutex_lock(&disp->mutex);
+
+	/* Multi-tile, part 1: lend or take back the phywins of heads that are
+	 * off before and after this commit, in a core update of its own ahead
+	 * of everything else (coreca7d_tile_prepare()).
+	 */
+	if (core->func->tile.prepare && atom->lock_core) {
+		bool busy[4];
+
+		nv50_disp_tile_state(dev, ntiles, active);
+		memcpy(busy, active, sizeof(busy));
+		for_each_old_crtc_in_state(state, crtc, old_crtc_state, i) {
+			if (nv50_head(crtc)->base.index < 4 && old_crtc_state->active)
+				busy[nv50_head(crtc)->base.index] = true;
+		}
+
+		if (core->func->tile.prepare(core, ntiles, active, busy)) {
+			u32 core_only[NV50_DISP_INTERLOCK__SIZE] = {};
+
+			NV_INFO(drm, "tiles: heads %02x %02x %02x %02x phywins %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				core->tiles[0], core->tiles[1], core->tiles[2], core->tiles[3],
+				core->phywin[0], core->phywin[1], core->phywin[2], core->phywin[3],
+				core->phywin[4], core->phywin[5], core->phywin[6], core->phywin[7]);
+			core->func->ntfy_init(disp->sync, NV50_DISP_CORE_NTFY);
+			core->func->update(core, core_only, true);
+			if (core->func->ntfy_wait_done(disp->sync, NV50_DISP_CORE_NTFY,
+						       core->chan.base.device))
+				NV_ERROR(drm, "core notifier timeout (tiles)\n");
+		}
+	}
 
 	/* Disable head(s). */
 	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
@@ -2469,6 +2551,32 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 
 		if (asyh->set.mask) {
 			nv50_head_flush_set(head, asyh);
+			interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+		}
+
+		/* Multi-tile, part 2: attach tiles and phywins, and split the
+		 * line across the tiles.
+		 */
+		if (core->func->tile.set && new_crtc_state->active &&
+		    drm_atomic_crtc_needs_modeset(new_crtc_state)) {
+			const int h = head->base.index;
+			const u16 width = asyh->state.adjusted_mode.hdisplay;
+			u16 width0;
+			int ret;
+
+			nv50_disp_tile_state(dev, ntiles, active);
+			width0 = nv50_disp_tile_width0(asyh, ntiles[h]);
+
+			ret = core->func->tile.set(core, ntiles, active, h, width0, width);
+			if (ret < 0)
+				NV_ERROR(drm, "%s: phywins for %d tile(s) still in use\n",
+					 crtc->name, ntiles[h]);
+			else if (ret || ntiles[h] > 1)
+				NV_INFO(drm, "%s: %d tile(s), 0x%02x, phywins 0x%02x/0x%02x, width %d+%d\n",
+					crtc->name, ntiles[h], core->tiles[h],
+					core->phywin[h * 2], core->phywin[h * 2 + 1],
+					ntiles[h] > 1 ? width0 : width,
+					ntiles[h] > 1 ? width - width0 : 0);
 			interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 		}
 
@@ -2742,6 +2850,72 @@ nv50_disp_outp_atomic_check_set(struct nv50_atom *atom,
 	return 0;
 }
 
+static struct drm_crtc *
+nv50_disp_tile_partner(struct drm_device *dev, struct drm_crtc *crtc)
+{
+	const int partner = nv50_head(crtc)->base.index ^ 2;
+	struct drm_crtc *tmp;
+
+	drm_for_each_crtc(tmp, dev) {
+		if (nv50_head(tmp)->base.index == partner)
+			return tmp;
+	}
+
+	return NULL;
+}
+
+static bool
+nv50_disp_tiled(struct drm_crtc_state *crtc_state)
+{
+	return crtc_state->active && nv50_head_atom(crtc_state)->tile.count > 1;
+}
+
+/* A head on two tiles borrows the phywins of its partner head
+ * (coreca7d_tile_phywin()), so the partner has to stay off, and can only
+ * come back on in a commit after the one that returns them.
+ */
+static int
+nv50_disp_atomic_check_tiles(struct drm_device *dev, struct drm_atomic_commit *state)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct drm_crtc_state *new_crtc_state, *new_pstate, *old_pstate;
+	struct drm_crtc *crtc, *partner;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+		const bool tiled = nv50_disp_tiled(new_crtc_state);
+		const bool enabling = new_crtc_state->enable &&
+				      drm_atomic_crtc_needs_modeset(new_crtc_state);
+
+		if (!tiled && !enabling)
+			continue;
+
+		partner = nv50_disp_tile_partner(dev, crtc);
+		if (!partner)
+			continue;
+
+		new_pstate = drm_atomic_get_crtc_state(state, partner);
+		if (IS_ERR(new_pstate))
+			return PTR_ERR(new_pstate);
+		old_pstate = drm_atomic_get_old_crtc_state(state, partner);
+
+		if (tiled && new_pstate->enable) {
+			NV_ATOMIC(drm, "%s: 2 tiles need %s off\n",
+				  crtc->name, partner->name);
+			return -EINVAL;
+		}
+
+		if (enabling && (nv50_disp_tiled(new_pstate) ||
+				 nv50_disp_tiled(old_pstate))) {
+			NV_ATOMIC(drm, "%s: %s holds its phywins\n",
+				  crtc->name, partner->name);
+			return -EBUSY;
+		}
+	}
+
+	return 0;
+}
+
 static int
 nv50_disp_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state)
 {
@@ -2780,6 +2954,12 @@ nv50_disp_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state)
 	ret = drm_atomic_helper_check(dev, state);
 	if (ret)
 		return ret;
+
+	if (core->func->tile.set) {
+		ret = nv50_disp_atomic_check_tiles(dev, state);
+		if (ret)
+			return ret;
+	}
 
 	for_each_oldnew_connector_in_state(state, connector, old_connector_state, new_connector_state, i) {
 		ret = nv50_disp_outp_atomic_check_clr(atom, old_connector_state);

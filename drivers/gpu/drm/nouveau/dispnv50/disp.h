@@ -32,6 +32,8 @@ struct nv50_disp {
 	struct mutex mutex;
 };
 
+extern int nv50_force_tiles;
+
 static inline struct nv50_disp *
 nv50_disp(struct drm_device *dev)
 {

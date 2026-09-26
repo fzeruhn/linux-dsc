@@ -12,6 +12,12 @@ struct nv50_core {
 	struct nv50_dmac chan;
 
 	bool assign_windows;
+
+	/* multi-tile: tiles owned by each head and phywins attached to each
+	 * window, as last pushed (coreca7d)
+	 */
+	u8 tiles[8];
+	u32 phywin[8];
 };
 
 int nv50_core_new(struct nouveau_drm *, struct nv50_core **);
@@ -29,6 +35,14 @@ struct nv50_core_func {
 	struct {
 		int (*owner)(struct nv50_core *);
 	} wndw;
+
+	/* ntiles[] and active[] are indexed by head, for heads 0-3 */
+	struct {
+		bool (*prepare)(struct nv50_core *, const int *ntiles,
+				const bool *active, const bool *busy);
+		int (*set)(struct nv50_core *, const int *ntiles,
+			   const bool *active, int head, u16 width0, u16 width);
+	} tile;
 
 	const struct nv50_head_func *head;
 #if IS_ENABLED(CONFIG_DEBUG_FS)

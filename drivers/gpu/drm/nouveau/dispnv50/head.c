@@ -408,6 +408,16 @@ nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *state)
 		asyh->ovly.cpp = 0;
 	}
 
+	/* Tiles only change with a modeset (coreca7d_tile_set()). */
+	if (drm_atomic_crtc_needs_modeset(&asyh->state)) {
+		asyh->tile.count = max_t(u8, asyh->or.tiles, 1);
+		if (asyh->state.active && head->disp->core->func->tile.set &&
+		    nv50_force_tiles > asyh->tile.count)
+			asyh->tile.count = min(nv50_force_tiles, 2);
+	} else {
+		asyh->tile.count = armh->tile.count;
+	}
+
 	if (!drm_atomic_crtc_needs_modeset(&asyh->state)) {
 		if (asyh->core.visible) {
 			if (memcmp(&armh->core, &asyh->core, sizeof(asyh->core)))
