@@ -693,6 +693,42 @@
 #define NVCA7D_HEAD_SET_TILE_MASK_TILE_TILE5                                    (0x00000020)
 #define NVCA7D_HEAD_SET_TILE_MASK_TILE_TILE6                                    (0x00000040)
 #define NVCA7D_HEAD_SET_TILE_MASK_TILE_TILE7                                    (0x00000080)
+#define NVCA7D_HEAD_SET_DSC_CONTROL(a)                                          (0x000022D4 + (a)*0x00000800)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_ENABLE                                      0:0
+#define NVCA7D_HEAD_SET_DSC_CONTROL_ENABLE_FALSE                                (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_ENABLE_TRUE                                 (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_AUTO_RESET                                  3:3
+#define NVCA7D_HEAD_SET_DSC_CONTROL_AUTO_RESET_DISABLE                          (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_AUTO_RESET_ENABLE                           (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FULL_ICH_ERR_PRECISION                      4:4
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FULL_ICH_ERR_PRECISION_DISABLE              (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FULL_ICH_ERR_PRECISION_ENABLE               (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FORCE_ICH_RESET                             5:5
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FORCE_ICH_RESET_FALSE                       (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FORCE_ICH_RESET_TRUE                        (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_CONTROL_FLATNESS_DET_THRESH                         15:6
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL(a)                                      (0x000022D8 + (a)*0x00000800)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_ENABLE                                  0:0
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_ENABLE_FALSE                            (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_ENABLE_TRUE                             (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LOCATION                                2:1
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LOCATION_VBLANK                         (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LOCATION_VSYNC                          (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LOCATION_LINE                           (0x00000002)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_SIZE                                    10:3
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_FREQUENCY                               11:11
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_FREQUENCY_EVERY_FRAME                   (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_FREQUENCY_ONCE                          (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LINE_ID                                 26:12
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LINE_ID_REVERSED                        27:27
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LINE_ID_REVERSED_DISABLE                (0x00000000)
+#define NVCA7D_HEAD_SET_DSC_PPS_CONTROL_LINE_ID_REVERSED_ENABLE                 (0x00000001)
+#define NVCA7D_HEAD_SET_DSC_PPS_HEAD(a)                                         (0x000022DC + (a)*0x00000800)
+#define NVCA7D_HEAD_SET_DSC_PPS_HEAD_BYTE0                                      7:0
+#define NVCA7D_HEAD_SET_DSC_PPS_HEAD_BYTE1                                      15:8
+#define NVCA7D_HEAD_SET_DSC_PPS_HEAD_BYTE2                                      23:16
+#define NVCA7D_HEAD_SET_DSC_PPS_HEAD_BYTE3                                      31:24
+#define NVCA7D_HEAD_SET_DSC_PPS_DATA0(a)                                        (0x000022E0 + (a)*0x00000800)
 #define NVCA7D_HEAD_SET_RASTER_SIZE(a)                                          (0x00002064 + (a)*0x00000800)
 #define NVCA7D_HEAD_SET_RASTER_SIZE_WIDTH                                       15:0
 #define NVCA7D_HEAD_SET_RASTER_SIZE_HEIGHT                                      31:16

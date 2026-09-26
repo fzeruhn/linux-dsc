@@ -185,6 +185,7 @@ nvkm_uoutp_mthd_dp_train(struct nvkm_outp *outp, void *argv, u32 argc)
 		outp->dp.lt.bw = args->v0.link_bw / 27000;
 		outp->dp.lt.mst = args->v0.mst;
 		outp->dp.lt.post_adj = args->v0.post_lt_adj;
+		outp->dp.lt.fec = args->v0.fec;
 	}
 
 	return outp->func->dp.train(outp, args->v0.retrain);

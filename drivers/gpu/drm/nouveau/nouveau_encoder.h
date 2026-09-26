@@ -88,6 +88,8 @@ struct nouveau_encoder {
 			struct {
 				u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE];
 				bool supported;
+				/* sink's DP_DSC_ENABLE is set */
+				bool enabled;
 			} dsc;
 
 			struct nvif_outp_dp_rate rate[8];
@@ -100,6 +102,7 @@ struct nouveau_encoder {
 				bool mst;
 				u8   nr;
 				u32  bw;
+				bool fec;
 			} lt;
 
 			/* Protects DP state that needs to be accessed outside
@@ -167,7 +170,9 @@ int nouveau_dp_dsc_compute_config(struct nouveau_encoder *,
 				  u8 bpc, u16 bpp_x16, struct drm_dsc_config *);
 
 int nouveau_dp_detect(struct nouveau_connector *, struct nouveau_encoder *);
-bool nouveau_dp_train(struct nouveau_encoder *, bool mst, u32 khz, u8 bpc);
+bool nouveau_dp_train(struct nouveau_encoder *, bool mst, u32 khz, u8 bpc,
+		      u16 dsc_bpp_x16);
+void nouveau_dp_dsc_enable(struct nouveau_encoder *, bool enable);
 void nouveau_dp_power_down(struct nouveau_encoder *);
 bool nouveau_dp_link_check(struct nouveau_connector *);
 void nouveau_dp_irq(struct work_struct *);

@@ -72,6 +72,8 @@ nv50_head_flush_set(struct nv50_head *head, struct nv50_head_atom *asyh)
 
 	if (asyh->set.view   ) head->func->view    (head, asyh);
 	if (asyh->set.mode   ) head->func->mode    (head, asyh);
+	if (asyh->set.dsc && head->func->dsc)
+		head->func->dsc(head, asyh);
 	if (asyh->set.core   ) head->func->core_set(head, asyh);
 	if (asyh->set.base   ) head->func->base    (head, asyh);
 	if (asyh->set.ovly   ) head->func->ovly    (head, asyh);
@@ -327,6 +329,7 @@ nv50_head_atomic_check_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 	asyh->or.nvsync = !!(mode->flags & DRM_MODE_FLAG_NVSYNC);
 	asyh->set.or = head->func->or != NULL;
 	asyh->set.mode = true;
+	asyh->set.dsc = head->func->dsc != NULL;
 }
 
 static int

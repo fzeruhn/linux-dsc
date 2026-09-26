@@ -335,7 +335,31 @@ nouveau_dp_power_down(struct nouveau_encoder *outp)
 
 	outp->dp.lt.nr = 0;
 	mutex_unlock(&outp->dp.hpd_irq_lock);
+
+	nouveau_dp_dsc_enable(outp, false);
 }
+
+/* Set or clear DSC decompression (DP_DSC_ENABLE) and FEC_READY in the sink
+ * before link training, as i915 does: DSC over DP needs FEC.  GSP's training
+ * clears FEC_READY again; r535_dp_train() sets it back before enabling FEC.
+ */
+void
+nouveau_dp_dsc_enable(struct nouveau_encoder *outp, bool enable)
+{
+	struct nouveau_drm *drm = nouveau_drm(outp->base.base.dev);
+	struct drm_dp_aux *aux = &outp->conn->aux;
+	int ret, fec;
+
+	if (outp->dp.dsc.enabled == enable)
+		return;
+
+	ret = drm_dp_dpcd_writeb(aux, DP_DSC_ENABLE, enable ? DP_DECOMPRESSION_EN : 0);
+	fec = drm_dp_dpcd_writeb(aux, DP_FEC_CONFIGURATION, enable ? DP_FEC_READY : 0);
+	NV_INFO(drm, "%s: sink DSC and FEC_READY %s: %d %d\n", outp->base.base.name,
+		enable ? "on" : "off", ret, fec);
+	outp->dp.dsc.enabled = enable && ret == 1 && fec == 1;
+}
+
 
 static bool
 nouveau_dp_train_link(struct nouveau_encoder *outp, bool retrain)
@@ -355,6 +379,7 @@ retry:
 					      outp->dp.lt.bw,
 					      outp->dp.lt.mst,
 					      post_lt,
+					      outp->dp.lt.fec,
 					      retrain);
 	if (ret)
 		return false;
@@ -422,7 +447,8 @@ retry:
 }
 
 bool
-nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc)
+nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc,
+		 u16 dsc_bpp_x16)
 {
 	struct nouveau_drm *drm = nouveau_drm(outp->base.base.dev);
 	struct drm_dp_aux *aux = &outp->conn->aux;
@@ -432,6 +458,8 @@ nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc)
 
 	if (mst)
 		min_rate = outp->dp.link_nr * outp->dp.rate[0].rate;
+	else if (dsc_bpp_x16) /* compressed, plus ~3% for FEC */
+		min_rate = DIV_ROUND_UP((u64)khz * dsc_bpp_x16 * 100, 8 * 16 * 97);
 	else
 		min_rate = DIV_ROUND_UP(khz * bpc * 3, 8);
 
@@ -454,6 +482,7 @@ nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc)
 				outp->dp.lt.nr = nr;
 				outp->dp.lt.bw = outp->dp.rate[rate].rate;
 				outp->dp.lt.mst = mst;
+				outp->dp.lt.fec = dsc_bpp_x16 != 0;
 				if (nouveau_dp_train_link(outp, false))
 					goto done;
 			}
@@ -671,12 +700,11 @@ nv50_dp_mode_valid(struct nouveau_encoder *outp,
 	if ((mode->flags & DRM_MODE_FLAG_3D_MASK) == DRM_MODE_FLAG_3D_FRAME_PACKING)
 		clock *= 2;
 
-	/* When DSC is supported, use effective bpp (compressed) for bandwidth check.
-	 * DSC 1.2 typically compresses ~3:1, so 18 bpp → 6 bpp.
-	 * The GSP will do final validation via CALCULATE_DP_IMP during mode set.
+	/* A sink with DSC can take the mode compressed down to 8bpp, the DSC
+	 * floor; nv50_outp_atomic_check_dsc() validates it with GSP.
 	 */
 	if (outp->dp.dsc.supported)
-		bpp = 6;
+		bpp = 8;
 
 	max_rate = outp->dp.link_nr * outp->dp.link_bw;
 	mode_rate = DIV_ROUND_UP(clock * bpp, 8);

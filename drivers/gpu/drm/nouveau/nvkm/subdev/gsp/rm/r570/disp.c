@@ -153,6 +153,8 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 	ctrl->linkConfig.linkRate10M = params->link_rate_10m;
 	ctrl->linkConfig.laneCount = params->lane_count;
 	ctrl->linkConfig.bEnhancedFraming = params->b_enhanced_framing;
+	/* DSC over 8b/10b SST needs FEC (nvkms enables it with DSC) */
+	ctrl->linkConfig.bFECEnabled = params->b_dsc_enabled;
 	ctrl->modesetInfo.rasterWidth = params->raster_width;
 	ctrl->modesetInfo.rasterHeight = params->raster_height;
 	ctrl->modesetInfo.surfaceWidth = params->surface_width;

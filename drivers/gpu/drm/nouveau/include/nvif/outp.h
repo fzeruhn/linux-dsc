@@ -106,7 +106,7 @@ struct nvif_outp_dp_rate {
 int nvif_outp_dp_rates(struct nvif_outp *, struct nvif_outp_dp_rate *rate, int rate_nr);
 int nvif_outp_dp_train(struct nvif_outp *, u8 dpcd[DP_RECEIVER_CAP_SIZE],
 		       u8 lttprs, u8 link_nr, u32 link_bw, bool mst, bool post_lt_adj,
-		       bool retrain);
+		       bool fec, bool retrain);
 int nvif_outp_dp_drive(struct nvif_outp *, u8 link_nr, u8 pe[4], u8 vs[4]);
 int nvif_outp_dp_sst(struct nvif_outp *, int head, u32 watermark, u32 hblanksym,
 		     u32 vblanksym, u32 tusize);

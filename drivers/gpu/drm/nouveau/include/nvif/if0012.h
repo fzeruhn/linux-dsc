@@ -240,6 +240,8 @@ union nvif_outp_dp_train_args {
 		__u8  lttprs;
 		__u8  post_lt_adj;
 		__u8  link_nr;
+		__u8  fec;
+		__u8  pad07;
 		__u32 link_bw;
 		__u8 dpcd[DP_RECEIVER_CAP_SIZE];
 	} v0;

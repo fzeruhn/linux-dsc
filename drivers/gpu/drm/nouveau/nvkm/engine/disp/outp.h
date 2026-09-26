@@ -59,6 +59,7 @@ struct nvkm_outp {
 				u8 bw;
 				bool mst;
 				bool post_adj;
+				bool fec;
 			} lt;
 		} dp;
 	};

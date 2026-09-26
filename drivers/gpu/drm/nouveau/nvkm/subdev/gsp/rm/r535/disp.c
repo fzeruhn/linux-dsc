@@ -989,6 +989,13 @@ r535_dp_train_target(struct nvkm_outp *outp, u8 target, bool mst, u8 link_nr, u8
 	    !(outp->dp.dpcd[DPCD_RC03] & DPCD_RC03_TPS4_SUPPORTED))
 		cmd |= NVDEF(NV0073_CTRL, DP_CMD, POST_LT_ADJ_REQ_GRANTED, YES);
 
+	/* Documented to have RM set the sink's FEC_READY before training, as
+	 * DPLib requests it; the sink ends up with it clear regardless, see
+	 * r535_dp_train().  The GPU side of FEC is r535_dp_configure_fec().
+	 */
+	if (target == 0 && outp->dp.lt.fec)
+		cmd |= NVDEF(NV0073_CTRL, DP_CMD, ENABLE_FEC, TRUE);
+
 	/* We should retry up to 3 times, but only if GSP asks politely */
 	for (retries = 0; retries < 3; ++retries) {
 		ctrl = nvkm_gsp_rm_ctrl_get(&disp->rm.objcom, NV0073_CTRL_CMD_DP_CTRL,
@@ -1026,12 +1033,72 @@ r535_dp_train_target(struct nvkm_outp *outp, u8 target, bool mst, u8 link_nr, u8
 }
 
 static int
+r535_dp_configure_fec(struct nvkm_outp *outp, bool enable)
+{
+	NV0073_CTRL_CMD_DP_CONFIGURE_FEC_PARAMS *ctrl;
+	struct nvkm_disp *disp = outp->disp;
+
+	ctrl = nvkm_gsp_rm_ctrl_get(&disp->rm.objcom,
+				    NV0073_CTRL_CMD_DP_CONFIGURE_FEC, sizeof(*ctrl));
+	if (IS_ERR(ctrl))
+		return PTR_ERR(ctrl);
+
+	ctrl->subDeviceInstance = 0;
+	ctrl->displayId = BIT(outp->index);
+	ctrl->bEnableFec = enable;
+
+	return nvkm_gsp_rm_ctrl_wr(&disp->rm.objcom, ctrl);
+}
+
+static int r535_dp_aux_xfer(struct nvkm_outp *, u8 type, u32 addr, u8 *data, u8 *psize);
+
+/* One DPCD byte over GSP's AUX channel (types as nvkm_rdaux/nvkm_wraux). */
+static int
+r535_dp_dpcd(struct nvkm_outp *outp, bool write, u32 addr, u8 *data)
+{
+	u8 size = 1;
+
+	return r535_dp_aux_xfer(outp, write ? 8 : 9, addr, data, &size);
+}
+
+static int
 r535_dp_train(struct nvkm_outp *outp, bool retrain)
 {
+	int ret;
+
 	for (int target = outp->dp.lttprs; target >= 0; target--) {
-		int ret = r535_dp_train_target(outp, target, outp->dp.lt.mst,
-							     outp->dp.lt.nr,
-							     outp->dp.lt.bw);
+		ret = r535_dp_train_target(outp, target, outp->dp.lt.mst,
+							 outp->dp.lt.nr,
+							 outp->dp.lt.bw);
+		if (ret)
+			return ret;
+	}
+
+	/* FEC goes on after training, including post-LT adjustment, which
+	 * happens in the DRM driver after this returns.
+	 */
+	if (outp->dp.lt.fec) {
+		u8 cfg = 0, status = 0;
+
+		if (outp->dp.lt.post_adj)
+			OUTP_ERR(outp, "FEC after post-LT adjustment isn't supported");
+
+		/* Training leaves the sink's FEC_READY (DPCD 0x120) clear even
+		 * with ENABLE_FEC, and a sink that isn't FEC-ready ignores the
+		 * FEC_DECODE_EN sequence the source sends when FEC goes on.
+		 */
+		r535_dp_dpcd(outp, false, 0x120, &cfg);
+		if (!(cfg & 0x01)) {
+			cfg |= 0x01;
+			r535_dp_dpcd(outp, true, 0x120, &cfg);
+			cfg = 0;
+			r535_dp_dpcd(outp, false, 0x120, &cfg);
+		}
+
+		ret = r535_dp_configure_fec(outp, true);
+		r535_dp_dpcd(outp, false, 0x280, &status);
+		OUTP_MSG(outp, info, "configure FEC: %d, sink FEC_READY 0x%02x status 0x%02x",
+			 ret, cfg, status);
 		if (ret)
 			return ret;
 	}

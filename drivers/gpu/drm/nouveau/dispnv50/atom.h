@@ -121,9 +121,7 @@ struct nv50_head_atom {
 		u8 depth:4;
 		u8 crc_raster:2;
 		u8 bpc;
-		/* stream is DSC-compressed (never set until DSC enable is
-		 * implemented: PPS, HEAD_SET_DSC_*, sink DP_DSC_ENABLE)
-		 */
+		/* stream is DSC-compressed (nv50_outp_atomic_check_dsc()) */
 		bool dsc;
 		/* tiles the output needs (DSC above HEAD_CLK_CAP) */
 		u8 tiles;
@@ -158,6 +156,7 @@ struct nv50_head_atom {
 			bool procamp:1;
 			bool crc:1;
 			bool or:1;
+			bool dsc:1;
 		};
 		u16 mask;
 	} set, clr;

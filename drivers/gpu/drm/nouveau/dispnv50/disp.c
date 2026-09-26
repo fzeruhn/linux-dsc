@@ -491,9 +491,13 @@ nv50_dp_dsc_dump(struct nouveau_drm *drm, const struct drm_dsc_config *dsc)
 		NV_INFO(drm, "PPS %02x: %*ph\n", i, 32, data + i);
 }
 
-/* Modes that only fit the link compressed.  Build the DSC config and
- * validate it with GSP, but reject the mode: nothing enables DSC in the
- * display engine or the sink yet, and committing one hangs the core channel.
+MODULE_PARM_DESC(dsc, "Drive DP modes that only fit compressed with DSC (GB20x, experimental; default: 0)");
+static int nv50_dsc;
+module_param_named(dsc, nv50_dsc, int, 0644);
+
+/* Modes that only fit the link compressed: build the DSC config, check it
+ * with GSP, and drive the mode as a DSC stream through as many tiles as the
+ * pixel clock needs.  Rejected unless nouveau.dsc is set.
  */
 static int
 nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
@@ -567,9 +571,23 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 		imp.h_blank_sym, imp.v_blank_sym);
 	nv50_dp_dsc_dump(drm, dsc);
 
-	NV_ERROR(drm, "%s: %dx%d needs DSC, which isn't implemented yet\n",
-		 encoder->name, mode->hdisplay, mode->vdisplay);
-	return -EINVAL;
+	if (ret || !imp.possible) {
+		NV_ERROR(drm, "%s: %dx%d doesn't fit the link as DSC either\n",
+			 encoder->name, mode->hdisplay, mode->vdisplay);
+		return -EINVAL;
+	}
+
+	if (!nv50_dsc) {
+		NV_ERROR(drm, "%s: %dx%d needs DSC, which is off (nouveau.dsc=0)\n",
+			 encoder->name, mode->hdisplay, mode->vdisplay);
+		return -EINVAL;
+	}
+
+	/* The head and the OR carry the uncompressed pixels. */
+	asyh->or.dsc = true;
+	asyh->or.bpc = bpc;
+	asyh->or.tiles = ntiles;
+	return 0;
 }
 
 static int
@@ -1220,7 +1238,7 @@ nv50_msto_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *s
 
 	if (!mstm->links++) {
 		nvif_outp_acquire_sor(&mstm->outp->outp, false /*TODO: MST audio... */);
-		nouveau_dp_train(mstm->outp, true, 0, 0);
+		nouveau_dp_train(mstm->outp, true, 0, 0, 0);
 	}
 
 	if (head->func->display_id) {
@@ -2012,7 +2030,11 @@ nv50_sor_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *st
 		nvif_outp_lvds(&nv_encoder->outp, lvds_dual, lvds_8bpc);
 		break;
 	case DCB_OUTPUT_DP:
-		nouveau_dp_train(nv_encoder, false, mode->clock, asyh->or.bpc);
+		/* The sink decompresses from before link training on. */
+		nouveau_dp_dsc_enable(nv_encoder, asyh->or.dsc);
+		if (!nouveau_dp_train(nv_encoder, false, mode->clock, asyh->or.bpc,
+				      asyh->or.dsc ? asyh->dsc.bits_per_pixel : 0))
+			NV_ERROR(drm, "%s: link training failed\n", encoder->name);
 		if (!nv50_sor_dp_watermark_sst(nv_encoder, head, asyh))
 			NV_ERROR(drm, "%s: DP watermark setup failed\n",
 				 encoder->name);
@@ -2199,7 +2221,7 @@ nv50_pior_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *s
 		break;
 	case DCB_OUTPUT_DP:
 		ctrl |= NVDEF(NV507D, PIOR_SET_CONTROL, PROTOCOL, EXT_TMDS_ENC);
-		nouveau_dp_train(nv_encoder, false, asyh->state.adjusted_mode.clock, 6);
+		nouveau_dp_train(nv_encoder, false, asyh->state.adjusted_mode.clock, 6, 0);
 		break;
 	default:
 		BUG();

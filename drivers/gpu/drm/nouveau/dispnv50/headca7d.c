@@ -10,6 +10,10 @@
 
 #include <nvhw/class/clca7d.h>
 
+#include <drm/display/drm_dsc_helper.h>
+
+#include <linux/unaligned.h>
+
 static int
 headca7d_display_id(struct nv50_head *head, u32 display_id)
 {
@@ -269,6 +273,66 @@ headca7d_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 	return 0;
 }
 
+/* Program the head's DSC engine and the PPS it sends in each vblank, as
+ * nvkms does for DP (EvoSetDpDscParamsC9()).  GSP doesn't do any of this.
+ */
+static int
+headca7d_dsc(struct nv50_head *head, struct nv50_head_atom *asyh)
+{
+	struct nvif_push *push = &head->disp->core->chan.push;
+	const struct drm_dsc_config *dsc = &asyh->dsc;
+	struct drm_dsc_picture_parameter_set pps;
+	const int i = head->base.index;
+	u32 data[32];
+	int ret;
+
+	BUILD_BUG_ON(sizeof(pps) != sizeof(data));
+
+	ret = PUSH_WAIT(push, 3 + 33 + 2);
+	if (ret)
+		return ret;
+
+	if (!asyh->or.dsc) {
+		PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_CONTROL(i),
+			  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, ENABLE, FALSE),
+
+					HEAD_SET_DSC_PPS_CONTROL(i),
+			  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, ENABLE, FALSE));
+		return 0;
+	}
+
+	/* HEAD_SET_DSC_PPS_DATA0 holds PPS bytes 0-3, byte 0 in bits 7:0 */
+	drm_dsc_pps_payload_pack(&pps, dsc);
+	for (int j = 0; j < ARRAY_SIZE(data); j++)
+		data[j] = get_unaligned_le32((u8 *)&pps + j * 4);
+
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_CONTROL(i),
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, ENABLE, TRUE) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_CONTROL, FLATNESS_DET_THRESH,
+			2 << (max_t(u8, dsc->bits_per_component, 8) - 8)) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, FULL_ICH_ERR_PRECISION, ENABLE) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, AUTO_RESET, DISABLE) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, FORCE_ICH_RESET, TRUE),
+
+				HEAD_SET_DSC_PPS_CONTROL(i),
+		  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, ENABLE, TRUE) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, LOCATION, VSYNC) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, FREQUENCY, EVERY_FRAME) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, SIZE, 0x1f)); /* dwords - 1 */
+
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_PPS_DATA0(i), data, ARRAY_SIZE(data));
+
+	/* The DP secondary-data packet header for a PPS (DP 1.4 2.2.5.9.1):
+	 * SDP ID 0, type 0x10, 128 bytes of payload.
+	 */
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_PPS_HEAD(i),
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE0, 0x00) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE1, 0x10) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE2, 0x7f) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE3, 0x00));
+	return 0;
+}
+
 static int
 headca7d_view(struct nv50_head *head, struct nv50_head_atom *asyh)
 {
@@ -309,4 +373,5 @@ headca7d = {
 	.or = headca7d_or,
 	.static_wndw_map = headc37d_static_wndw_map,
 	.display_id = headca7d_display_id,
+	.dsc = headca7d_dsc,
 };
