@@ -299,7 +299,6 @@ typedef struct NV0073_CTRL_DP_IMP_LINK_CONFIGURATION {
     NvBool bDp2xChannelCoding;
     NvBool bMultiStreamTopology;
     NvBool bFECEnabled;
-    NvBool bDisableEffBppSST8b10b;
 } NV0073_CTRL_DP_IMP_LINK_CONFIGURATION;
 
 typedef struct NV0073_CTRL_DP_IMP_DSC_PARAMETERS {

@@ -105,13 +105,16 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 		return -ENOSYS;
 
 	/* This is a pure calculation, so it's also used during atomic_check,
-	 * before an OR has been acquired.  Any SOR the output can use will do
-	 * for finding the implementation.
+	 * before an OR has been acquired.  It doesn't touch the OR; any SOR
+	 * will do for finding the implementation (GSP assigns SORs itself,
+	 * so outp->info.or can't be relied on).
 	 */
-	if (!ior && outp->info.or)
-		ior = nvkm_ior_find(disp, SOR, ffs(outp->info.or) - 1);
+	if (!ior)
+		ior = nvkm_ior_find(disp, SOR, -1);
+	if (!ior)
+		return -ENODEV;
 
-	if (!ior || !ior->func->dp || !ior->func->dp->calc_imp ||
+	if (!ior->func->dp || !ior->func->dp->calc_imp ||
 	    !nvkm_head_find(disp, args->v0.head))
 		return -EINVAL;
 
