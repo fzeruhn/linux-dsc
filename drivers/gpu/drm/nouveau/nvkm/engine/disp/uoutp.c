@@ -104,12 +104,20 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	if (argc != sizeof(args->v0) || args->v0.version != 0)
 		return -ENOSYS;
 
-	if (!ior->func->dp || !ior->func->dp->calc_imp ||
+	/* This is a pure calculation, so it's also used during atomic_check,
+	 * before an OR has been acquired.  Any SOR the output can use will do
+	 * for finding the implementation.
+	 */
+	if (!ior && outp->info.or)
+		ior = nvkm_ior_find(disp, SOR, ffs(outp->info.or) - 1);
+
+	if (!ior || !ior->func->dp || !ior->func->dp->calc_imp ||
 	    !nvkm_head_find(disp, args->v0.head))
 		return -EINVAL;
 
 	memset(&params, 0, sizeof(params));
 	params.head = args->v0.head;
+	params.display_id = outp->index;
 	params.slice_count = args->v0.slice_count;
 	params.slice_width = args->v0.slice_width;
 	params.slice_height = args->v0.slice_height;
@@ -122,6 +130,8 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	params.raster_height = args->v0.raster_height;
 	params.surface_width = args->v0.surface_width;
 	params.surface_height = args->v0.surface_height;
+	params.raster_blank_start_x = args->v0.raster_blank_start_x;
+	params.raster_blank_end_x = args->v0.raster_blank_end_x;
 	params.depth = args->v0.depth;
 	params.pixel_frequency_khz = args->v0.pixel_frequency_khz;
 	params.bits_per_component = args->v0.bits_per_component;
@@ -559,7 +569,6 @@ nvkm_uoutp_mthd_acquired(struct nvkm_outp *outp, u32 mthd, void *argv, u32 argc)
 	case NVIF_OUTP_V0_DP_TRAIN     : return nvkm_uoutp_mthd_dp_train     (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_DRIVE     : return nvkm_uoutp_mthd_dp_drive     (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_SST       : return nvkm_uoutp_mthd_dp_sst       (outp, argv, argc);
-	case NVIF_OUTP_V0_DP_CALC_IMP  : return nvkm_uoutp_mthd_dp_calc_imp  (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_ID_GET: return nvkm_uoutp_mthd_dp_mst_id_get(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_ID_PUT: return nvkm_uoutp_mthd_dp_mst_id_put(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_VCPI  : return nvkm_uoutp_mthd_dp_mst_vcpi  (outp, argv, argc);
@@ -584,6 +593,7 @@ nvkm_uoutp_mthd_noacquire(struct nvkm_outp *outp, u32 mthd, void *argv, u32 argc
 	case NVIF_OUTP_V0_DP_AUX_PWR : return nvkm_uoutp_mthd_dp_aux_pwr (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_AUX_XFER: return nvkm_uoutp_mthd_dp_aux_xfer(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_RATES   : return nvkm_uoutp_mthd_dp_rates   (outp, argv, argc);
+	case NVIF_OUTP_V0_DP_CALC_IMP: return nvkm_uoutp_mthd_dp_calc_imp(outp, argv, argc);
 	default:
 		break;
 	}

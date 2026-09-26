@@ -6,6 +6,7 @@ struct nvkm_i2c_aux;
 
 struct nvkm_dp_calc_imp {
 	int    head;
+	int    display_id;
 	/* DSC params */
 	u32    slice_count;
 	u32    slice_width;
@@ -21,6 +22,8 @@ struct nvkm_dp_calc_imp {
 	u32    raster_height;
 	u32    surface_width;
 	u32    surface_height;
+	u32    raster_blank_start_x;
+	u32    raster_blank_end_x;
 	u32    depth;
 	u32    pixel_frequency_khz;
 	u32    bits_per_component;

@@ -403,6 +403,120 @@ nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *c
 	}
 }
 
+struct nv50_dp_dsc_imp {
+	u32 bpp_x16;
+	u32 water_mark;
+	u32 tu_size;
+	u32 min_h_blank;
+	u32 h_blank_sym;
+	u32 v_blank_sym;
+	u32 effective_bpp;
+	bool possible;
+};
+
+/* Compressed bpp (in 1/16 bpp) for a DSC stream: 2:1, or less if the link
+ * can't carry that, keeping ~3% headroom.  0 if even 8bpp won't fit.
+ */
+static u32
+nv50_dp_dsc_bpp_x16(struct nouveau_encoder *outp, u32 clock, u8 bpc)
+{
+	u64 link_x16 = (u64)outp->dp.link_nr * outp->dp.link_bw * 8 * 16 * 97;
+	u32 bpp_x16 = min_t(u32, bpc * 3 * 16 / 2,
+			    div_u64(link_x16, clock * 100));
+
+	return bpp_x16 >= 8 * 16 ? bpp_x16 : 0;
+}
+
+/* Ask GSP (CALCULATE_DP_IMP) whether the link can carry mode as a DSC stream
+ * and for the SST watermark parameters to use.
+ */
+static int
+nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
+		     const struct drm_display_mode *adjusted_mode, u8 bpc,
+		     struct nv50_dp_dsc_imp *imp)
+{
+	bool ef = outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP;
+	struct nouveau_dp_dsc_params dsc;
+	struct drm_display_mode mode;
+	u32 blanke, blanks;
+
+	drm_mode_copy(&mode, adjusted_mode);
+	drm_mode_set_crtcinfo(&mode, CRTC_INTERLACE_HALVE_V);
+
+	/* Same raster convention as nv50_head_atomic_check_mode(). */
+	blanke = mode.crtc_hblank_end - mode.crtc_hsync_start - 1;
+	blanks = blanke + mode.crtc_hdisplay;
+
+	imp->bpp_x16 = nv50_dp_dsc_bpp_x16(outp, mode.clock, bpc);
+	if (!imp->bpp_x16)
+		return -ERANGE;
+
+	nouveau_dp_dsc_geometry(outp, &mode, &dsc);
+
+	return nvif_outp_dp_calc_imp(&outp->outp, head,
+				     dsc.slice_count, dsc.slice_width,
+				     dsc.slice_height,
+				     dsc.dsc_version_major,
+				     dsc.dsc_version_minor,
+				     outp->dp.link_bw / 1000, /* 10Mbps units */
+				     outp->dp.link_nr, ef,
+				     mode.crtc_htotal, mode.crtc_vtotal,
+				     mode.crtc_hdisplay, mode.crtc_vdisplay,
+				     blanks, blanke,
+				     imp->bpp_x16, /* DSC depth is bpp * 16 */
+				     mode.clock, bpc,
+				     0, /* colorFormat: RGB */
+				     true,
+				     &imp->water_mark, &imp->tu_size,
+				     &imp->min_h_blank, &imp->h_blank_sym,
+				     &imp->v_blank_sym, &imp->effective_bpp,
+				     &imp->possible);
+}
+
+/* Modes that only fit the link compressed.  Validate them with GSP, but
+ * reject them: nothing enables DSC in the display engine or the sink yet, and
+ * committing one hangs the core channel.
+ */
+static int
+nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
+			   struct drm_crtc_state *crtc_state,
+			   struct drm_connector_state *conn_state)
+{
+	struct nouveau_encoder *outp = nouveau_encoder(encoder);
+	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+	struct nouveau_drm *drm = nouveau_drm(encoder->dev);
+	struct nv50_dp_dsc_imp imp = {};
+	unsigned int max_rate, mode_rate;
+	u8 bpc;
+	int ret;
+
+	asyh->or.dsc = false;
+
+	if (outp->dcb->type != DCB_OUTPUT_DP || !crtc_state->enable)
+		return 0;
+
+	max_rate = outp->dp.link_nr * outp->dp.link_bw;
+	mode_rate = DIV_ROUND_UP(mode->clock * asyh->or.bpc * 3, 8);
+	if (mode_rate <= max_rate || !outp->dp.dsc.supported)
+		return 0;
+
+	/* fix_depth already gave up at 6bpc; compress from the sink's depth. */
+	bpc = clamp_t(u8, conn_state->connector->display_info.bpc, 8, 10);
+
+	ret = nv50_dp_dsc_calc_imp(outp, nv50_head(crtc_state->crtc)->base.index,
+				   mode, bpc, &imp);
+	NV_INFO(drm, "%s: DSC %dx%d@%dkHz %dbpc -> %d/16bpp on %dx%d: ret %d possible %d wm %d tu %d hblank %d vblank %d\n",
+		encoder->name, mode->hdisplay, mode->vdisplay, mode->clock,
+		bpc, imp.bpp_x16, outp->dp.link_nr, outp->dp.link_bw,
+		ret, imp.possible, imp.water_mark, imp.tu_size,
+		imp.h_blank_sym, imp.v_blank_sym);
+
+	NV_ERROR(drm, "%s: %dx%d needs DSC, which isn't implemented yet\n",
+		 encoder->name, mode->hdisplay, mode->vdisplay);
+	return -EINVAL;
+}
+
 static int
 nv50_outp_atomic_check(struct drm_encoder *encoder,
 		       struct drm_crtc_state *crtc_state,
@@ -424,7 +538,7 @@ nv50_outp_atomic_check(struct drm_encoder *encoder,
 	/* We might have to reduce the bpc */
 	nv50_outp_atomic_fix_depth(encoder, crtc_state);
 
-	return 0;
+	return nv50_outp_atomic_check_dsc(encoder, crtc_state, conn_state);
 }
 
 struct nouveau_connector *
@@ -1620,7 +1734,7 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 	s32 hblank_symbols;
 	// number of link clocks per line.
 	int vblank_symbols	  = 0;
-	bool bEnableDsc = outp->dp.dsc.supported;
+	bool bEnableDsc = asyh->or.dsc;
 	unsigned surfaceWidth = asyh->mode.h.blanks - asyh->mode.h.blanke;
 	unsigned rasterWidth = asyh->mode.h.active;
 	unsigned depth = asyh->or.bpc * 3;
@@ -1642,39 +1756,18 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 
 	// DSC: use GSP to calculate watermark
 	if (bEnableDsc) {
-		struct nouveau_dp_dsc_params dsc_params;
-		u32 minHBlank, effectiveBpp;
-		bool bIsModePossible;
+		struct nv50_dp_dsc_imp imp;
 		int ret;
 
-		nouveau_dp_dsc_geometry(outp, &asyh->state.mode, &dsc_params);
-
-		ret = nvif_outp_dp_calc_imp(&outp->outp, head->base.index,
-					     dsc_params.slice_count,
-					     dsc_params.slice_width,
-					     dsc_params.slice_height,
-					     dsc_params.dsc_version_major,
-					     dsc_params.dsc_version_minor,
-					     outp->dp.link_bw,
-					     outp->dp.link_nr,
-					     enhancedFraming,
-					     rasterWidth,
-					     asyh->mode.v.active,
-					     surfaceWidth,
-					     asyh->mode.v.blanks - asyh->mode.v.blanke,
-					     depth,
-					     asyh->mode.clock,
-					     asyh->or.bpc,
-					     0, /* colorFormat */
-					     true, /* dsc_enabled */
-					     &waterMark, &tuSize, &minHBlank,
-					     &hBlankSym, &vBlankSym,
-					     &effectiveBpp, &bIsModePossible);
-		if (ret || !bIsModePossible)
+		ret = nv50_dp_dsc_calc_imp(outp, head->base.index,
+					   &asyh->state.adjusted_mode,
+					   asyh->or.bpc, &imp);
+		if (ret || !imp.possible)
 			return false;
 
 		return nvif_outp_dp_sst(&outp->outp, head->base.index,
-					 waterMark, hBlankSym, vBlankSym, tuSize);
+					imp.water_mark, imp.h_blank_sym,
+					imp.v_blank_sym, imp.tu_size) == 0;
 	}
 
 	if ((pixelClockHz * depth) >= (8 * minRate * outp->dp.link_nr * DSC_FACTOR))
@@ -1774,7 +1867,8 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 
 	vBlankSym = (vblank_symbols < 0) ? 0 : vblank_symbols;
 
-	return nvif_outp_dp_sst(&outp->outp, head->base.index, waterMark, hBlankSym, vBlankSym, tuSize);
+	return nvif_outp_dp_sst(&outp->outp, head->base.index, waterMark,
+				hBlankSym, vBlankSym, tuSize) == 0;
 }
 
 static void
@@ -1864,7 +1958,9 @@ nv50_sor_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *st
 		break;
 	case DCB_OUTPUT_DP:
 		nouveau_dp_train(nv_encoder, false, mode->clock, asyh->or.bpc);
-		nv50_sor_dp_watermark_sst(nv_encoder, head, asyh);
+		if (!nv50_sor_dp_watermark_sst(nv_encoder, head, asyh))
+			NV_ERROR(drm, "%s: DP watermark setup failed\n",
+				 encoder->name);
 		depth = nv50_dp_bpc_to_depth(asyh->or.bpc);
 
 		if (nv_encoder->outp.or.link & 1)

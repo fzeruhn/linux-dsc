@@ -102,6 +102,7 @@ nvif_outp_dp_calc_imp(struct nvif_outp *outp, int head,
 		      u32 link_rate_10m, u32 lane_count, bool enhanced_framing,
 		      u32 raster_width, u32 raster_height,
 		      u32 surface_width, u32 surface_height,
+		      u32 raster_blank_start_x, u32 raster_blank_end_x,
 		      u32 depth, u32 pixel_frequency_khz,
 		      u32 bits_per_component, u32 color_format,
 		      bool dsc_enabled,
@@ -126,6 +127,8 @@ nvif_outp_dp_calc_imp(struct nvif_outp *outp, int head,
 	args.raster_height = raster_height;
 	args.surface_width = surface_width;
 	args.surface_height = surface_height;
+	args.raster_blank_start_x = raster_blank_start_x;
+	args.raster_blank_end_x = raster_blank_end_x;
 	args.depth = depth;
 	args.pixel_frequency_khz = pixel_frequency_khz;
 	args.bits_per_component = bits_per_component;

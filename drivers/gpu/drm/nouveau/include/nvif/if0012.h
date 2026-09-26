@@ -288,6 +288,8 @@ union nvif_outp_dp_calc_imp_args {
 		__u32 raster_height;
 		__u32 surface_width;
 		__u32 surface_height;
+		__u32 raster_blank_start_x;
+		__u32 raster_blank_end_x;
 		__u32 depth;
 		__u32 pixel_frequency_khz;
 		__u32 bits_per_component;

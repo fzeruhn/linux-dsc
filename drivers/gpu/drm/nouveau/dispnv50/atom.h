@@ -120,6 +120,10 @@ struct nv50_head_atom {
 		u8 depth:4;
 		u8 crc_raster:2;
 		u8 bpc;
+		/* stream is DSC-compressed (never set until DSC enable is
+		 * implemented: PPS, HEAD_SET_DSC_*, sink DP_DSC_ENABLE)
+		 */
+		bool dsc;
 	} or;
 
 	struct nv50_crc_atom crc;

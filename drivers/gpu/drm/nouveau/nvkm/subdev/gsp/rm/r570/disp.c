@@ -148,7 +148,7 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 		return PTR_ERR(ctrl);
 
 	ctrl->subDeviceInstance = 0;
-	ctrl->displayId = BIT(params->head);
+	ctrl->displayId = BIT(params->display_id);
 	ctrl->headIndex = params->head;
 	ctrl->linkConfig.linkRate10M = params->link_rate_10m;
 	ctrl->linkConfig.laneCount = params->lane_count;
@@ -157,6 +157,8 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 	ctrl->modesetInfo.rasterHeight = params->raster_height;
 	ctrl->modesetInfo.surfaceWidth = params->surface_width;
 	ctrl->modesetInfo.surfaceHeight = params->surface_height;
+	ctrl->modesetInfo.rasterBlankStartX = params->raster_blank_start_x;
+	ctrl->modesetInfo.rasterBlankEndX = params->raster_blank_end_x;
 	ctrl->modesetInfo.depth = params->depth;
 	ctrl->modesetInfo.pixelFrequencyKHz = params->pixel_frequency_khz;
 	ctrl->modesetInfo.bitsPerComponent = params->bits_per_component;
