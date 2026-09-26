@@ -13,6 +13,8 @@ struct nv50_disp {
 	struct nvif_disp *disp;
 	struct nv50_core *core;
 	struct nvif_object caps;
+	/* per-head (per-tile) pixel clock limit from HEAD_CLK_CAP, 0 if unknown */
+	u32 head_max_khz[8];
 
 #define NV50_DISP_SYNC(c, o)                                ((c) * 0x040 + (o))
 #define NV50_DISP_CORE_NTFY                       NV50_DISP_SYNC(0      , 0x00)

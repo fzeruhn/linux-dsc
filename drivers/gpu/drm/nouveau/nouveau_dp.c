@@ -23,6 +23,7 @@
  */
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/display/drm_dsc_helper.h>
 
 #include "nouveau_drv.h"
 #include "nouveau_connector.h"
@@ -132,6 +133,11 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 		ret = drm_dp_dpcd_read(aux, DP_DSC_SUPPORT, dsc_dpcd,
 					sizeof(dsc_dpcd));
 		if (ret == sizeof(dsc_dpcd)) {
+			if (memcmp(outp->dp.dsc.dsc_dpcd, dsc_dpcd,
+				   sizeof(dsc_dpcd)))
+				NV_INFO(nouveau_drm(connector->dev),
+					"%s: DSC DPCD %*ph\n", connector->name,
+					(int)sizeof(dsc_dpcd), dsc_dpcd);
 			memcpy(outp->dp.dsc.dsc_dpcd, dsc_dpcd,
 			       sizeof(dsc_dpcd));
 			outp->dp.dsc.supported =
@@ -533,41 +539,113 @@ nouveau_dp_irq(struct work_struct *work)
 	nouveau_connector_hpd(nv_connector, NVIF_CONN_EVENT_V0_IRQ | hpd);
 }
 
-/* Pick DSC geometry for a mode given the sink's DSC caps. */
-void
-nouveau_dp_dsc_geometry(struct nouveau_encoder *outp,
-			const struct drm_display_mode *mode,
-			struct nouveau_dp_dsc_params *params)
+/* Smallest slice count the sink advertises that keeps each slice within the
+ * sink's max slice width and per-slice pixel throughput.  0 if none does.
+ */
+static u32
+nouveau_dp_dsc_slice_count(struct nouveau_encoder *outp,
+			   const struct drm_display_mode *mode)
 {
-	const u32 raster_width = mode->hdisplay;
-	const u32 raster_height = mode->vdisplay;
-	const u32 max_slice_width =
-		drm_dp_dsc_sink_max_slice_width(outp->dp.dsc.dsc_dpcd);
-	const u32 mask =
-		drm_dp_dsc_sink_slice_count_mask(outp->dp.dsc.dsc_dpcd, false);
-	u32 min_count, slice_count;
+	const u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
+	const u32 max_slice_width = drm_dp_dsc_sink_max_slice_width(dsc_dpcd);
+	const u32 mask = drm_dp_dsc_sink_slice_count_mask(dsc_dpcd, false);
+	const int throughput =
+		drm_dp_dsc_sink_max_slice_throughput(dsc_dpcd, mode->clock, true);
+	u32 min_count;
 
-	params->dsc_version_major = 1;
-	params->dsc_version_minor = 2;
-	params->slice_height = raster_height;
-
-	/* Smallest slice count that keeps the slice width within the max. */
 	min_count = max_slice_width ?
-		    DIV_ROUND_UP(raster_width, max_slice_width) : 1;
+		    DIV_ROUND_UP(mode->hdisplay, max_slice_width) : 1;
+	if (throughput > 0)
+		min_count = max_t(u32, min_count,
+				  DIV_ROUND_UP(mode->clock, throughput));
 
-	/* Round up to the next slice count the sink advertises. */
-	slice_count = 0;
 	for (u32 count = min_count; count <= 24; count++) {
-		if (mask & drm_dp_dsc_slice_count_to_mask(count)) {
-			slice_count = count;
-			break;
-		}
+		if (mask & drm_dp_dsc_slice_count_to_mask(count))
+			return count;
 	}
-	if (!slice_count)
-		slice_count = min_count;
 
-	params->slice_count = slice_count;
-	params->slice_width = DIV_ROUND_UP(raster_width, slice_count);
+	return 0;
+}
+
+/* drm_dsc_compute_rc_parameters() truncates scale_increment_interval into
+ * its 16-bit PPS field, which happens when slices are too tall.  Same checks
+ * as NVIDIA's DSC_PpsCalcScaleInterval().
+ */
+static bool
+nouveau_dp_dsc_scale_valid(const struct drm_dsc_config *cfg)
+{
+	u32 final_scale = 8 * cfg->rc_model_size /
+			  (cfg->rc_model_size - cfg->final_offset);
+
+	if (final_scale > 63)
+		return false;
+
+	if (final_scale > 9 &&
+	    ((u32)cfg->final_offset << 11) /
+	    ((final_scale - 9) * (cfg->nfl_bpg_offset + cfg->slice_bpg_offset)) > 0xffff)
+		return false;
+
+	return cfg->scale_decrement_interval >= 1 &&
+	       cfg->scale_decrement_interval <= DSC_SCALE_DECREMENT_INTERVAL_MAX;
+}
+
+/* Fill in the DSC config (the PPS contents) for compressing mode from bpc to
+ * bpp_x16 (1/16 bpp).  Slices are as few as the sink allows; slice height is
+ * the tallest vdisplay / 1..16 whose rate-control parameters fit the PPS, as
+ * NVIDIA's Dsc_PpsCalcHeight() does for DP.
+ */
+int
+nouveau_dp_dsc_compute_config(struct nouveau_encoder *outp,
+			      const struct drm_display_mode *mode,
+			      u8 bpc, u16 bpp_x16, struct drm_dsc_config *cfg)
+{
+	const u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
+	const u8 rev = dsc_dpcd[DP_DSC_REV - DP_DSC_SUPPORT];
+	u32 slice_count = nouveau_dp_dsc_slice_count(outp, mode);
+	int ret;
+
+	if (!slice_count)
+		return -EINVAL;
+
+	memset(cfg, 0, sizeof(*cfg));
+	cfg->dsc_version_major = 1;
+	cfg->dsc_version_minor = min_t(u8, (rev & DP_DSC_MINOR_MASK) >>
+					   DP_DSC_MINOR_SHIFT, 2);
+	cfg->pic_width = mode->hdisplay;
+	cfg->pic_height = mode->vdisplay;
+	cfg->slice_count = slice_count;
+	cfg->slice_width = DIV_ROUND_UP(mode->hdisplay, slice_count);
+	cfg->bits_per_component = bpc;
+	cfg->bits_per_pixel = bpp_x16;
+	cfg->convert_rgb = true;
+	/* 13: the most NVIDIA's DSC encoder accepts (nvt_dsc_pps.h) */
+	cfg->line_buf_depth = min_t(u8, drm_dp_dsc_sink_line_buf_depth(dsc_dpcd), 13);
+	cfg->block_pred_enable =
+		dsc_dpcd[DP_DSC_BLK_PREDICTION_SUPPORT - DP_DSC_SUPPORT] &
+		DP_DSC_BLK_PREDICTION_IS_SUPPORTED;
+
+	if (cfg->line_buf_depth < 8)
+		return -EINVAL;
+
+	drm_dsc_set_const_params(cfg);
+	drm_dsc_set_rc_buf_thresh(cfg);
+	ret = drm_dsc_setup_rc_params(cfg, DRM_DSC_1_2_444);
+	if (ret)
+		return ret;
+
+	for (int i = 1; i <= 16 && mode->vdisplay / i >= 8; i++) {
+		if (mode->vdisplay % i)
+			continue;
+
+		cfg->slice_height = mode->vdisplay / i;
+		/* compute_rc_parameters() may lower it for narrow slices */
+		cfg->initial_scale_value = drm_dsc_initial_scale_value(cfg);
+		if (!drm_dsc_compute_rc_parameters(cfg) &&
+		    nouveau_dp_dsc_scale_valid(cfg))
+			return 0;
+	}
+
+	return -ERANGE;
 }
 
 /* TODO:

@@ -161,18 +161,10 @@ enum nouveau_dp_status {
 	NOUVEAU_DP_MST,
 };
 
-/* DSC geometry for a mode */
-struct nouveau_dp_dsc_params {
-	u32 slice_count;
-	u32 slice_width;
-	u32 slice_height;
-	u32 dsc_version_major;
-	u32 dsc_version_minor;
-};
-
-void nouveau_dp_dsc_geometry(struct nouveau_encoder *,
-			     const struct drm_display_mode *,
-			     struct nouveau_dp_dsc_params *);
+struct drm_dsc_config;
+int nouveau_dp_dsc_compute_config(struct nouveau_encoder *,
+				  const struct drm_display_mode *,
+				  u8 bpc, u16 bpp_x16, struct drm_dsc_config *);
 
 int nouveau_dp_detect(struct nouveau_connector *, struct nouveau_encoder *);
 bool nouveau_dp_train(struct nouveau_encoder *, bool mst, u32 khz, u8 bpc);

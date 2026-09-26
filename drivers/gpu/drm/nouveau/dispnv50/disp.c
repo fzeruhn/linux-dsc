@@ -35,6 +35,7 @@
 #include <linux/iopoll.h>
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/display/drm_dsc_helper.h>
 #include <drm/display/drm_scdc_helper.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -404,7 +405,6 @@ nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *c
 }
 
 struct nv50_dp_dsc_imp {
-	u32 bpp_x16;
 	u32 water_mark;
 	u32 tu_size;
 	u32 min_h_blank;
@@ -414,29 +414,35 @@ struct nv50_dp_dsc_imp {
 	bool possible;
 };
 
-/* Compressed bpp (in 1/16 bpp) for a DSC stream: 2:1, or less if the link
- * can't carry that, keeping ~3% headroom.  0 if even 8bpp won't fit.
+/* Compressed bpp (in 1/16 bpp) for a DSC stream: the highest bpp that the
+ * DRM rate-control tables cover (8, 10, 12, 15), is at most 2:1, and fits
+ * the link with ~3% headroom.  0 if even 8bpp won't fit.
  */
 static u32
 nv50_dp_dsc_bpp_x16(struct nouveau_encoder *outp, u32 clock, u8 bpc)
 {
-	u64 link_x16 = (u64)outp->dp.link_nr * outp->dp.link_bw * 8 * 16 * 97;
-	u32 bpp_x16 = min_t(u32, bpc * 3 * 16 / 2,
-			    div_u64(link_x16, clock * 100));
+	static const u8 bpps[] = { 15, 12, 10, 8 };
+	u32 max_x16 = div_u64((u64)outp->dp.link_nr * outp->dp.link_bw *
+			      8 * 16 * 97, clock * 100);
 
-	return bpp_x16 >= 8 * 16 ? bpp_x16 : 0;
+	for (int i = 0; i < ARRAY_SIZE(bpps); i++) {
+		if (bpps[i] * 16 <= max_x16 && bpps[i] * 2 <= bpc * 3)
+			return bpps[i] * 16;
+	}
+
+	return 0;
 }
 
-/* Ask GSP (CALCULATE_DP_IMP) whether the link can carry mode as a DSC stream
- * and for the SST watermark parameters to use.
+/* Ask GSP (CALCULATE_DP_IMP) whether the link can carry mode as the DSC
+ * stream described by dsc, and for the SST watermark parameters to use.
  */
 static int
 nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
-		     const struct drm_display_mode *adjusted_mode, u8 bpc,
+		     const struct drm_display_mode *adjusted_mode,
+		     const struct drm_dsc_config *dsc,
 		     struct nv50_dp_dsc_imp *imp)
 {
 	bool ef = outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP;
-	struct nouveau_dp_dsc_params dsc;
 	struct drm_display_mode mode;
 	u32 blanke, blanks;
 
@@ -447,24 +453,18 @@ nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
 	blanke = mode.crtc_hblank_end - mode.crtc_hsync_start - 1;
 	blanks = blanke + mode.crtc_hdisplay;
 
-	imp->bpp_x16 = nv50_dp_dsc_bpp_x16(outp, mode.clock, bpc);
-	if (!imp->bpp_x16)
-		return -ERANGE;
-
-	nouveau_dp_dsc_geometry(outp, &mode, &dsc);
-
 	return nvif_outp_dp_calc_imp(&outp->outp, head,
-				     dsc.slice_count, dsc.slice_width,
-				     dsc.slice_height,
-				     dsc.dsc_version_major,
-				     dsc.dsc_version_minor,
+				     dsc->slice_count, dsc->slice_width,
+				     dsc->slice_height,
+				     dsc->dsc_version_major,
+				     dsc->dsc_version_minor,
 				     outp->dp.link_bw / 1000, /* 10Mbps units */
 				     outp->dp.link_nr, ef,
 				     mode.crtc_htotal, mode.crtc_vtotal,
 				     mode.crtc_hdisplay, mode.crtc_vdisplay,
 				     blanks, blanke,
-				     imp->bpp_x16, /* DSC depth is bpp * 16 */
-				     mode.clock, bpc,
+				     dsc->bits_per_pixel, /* DSC depth is bpp * 16 */
+				     mode.clock, dsc->bits_per_component,
 				     0, /* colorFormat: RGB */
 				     true,
 				     &imp->water_mark, &imp->tu_size,
@@ -473,9 +473,23 @@ nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
 				     &imp->possible);
 }
 
-/* Modes that only fit the link compressed.  Validate them with GSP, but
- * reject them: nothing enables DSC in the display engine or the sink yet, and
- * committing one hangs the core channel.
+static void
+nv50_dp_dsc_dump(struct nouveau_drm *drm, const struct drm_dsc_config *dsc)
+{
+	struct drm_printer p = drm_info_printer(drm->dev->dev);
+	struct drm_dsc_picture_parameter_set pps;
+	const u8 *data = (const u8 *)&pps;
+
+	drm_dsc_dump_config(&p, 1, dsc);
+
+	drm_dsc_pps_payload_pack(&pps, dsc);
+	for (int i = 0; i < sizeof(pps); i += 32)
+		NV_INFO(drm, "PPS %02x: %*ph\n", i, 32, data + i);
+}
+
+/* Modes that only fit the link compressed.  Build the DSC config and
+ * validate it with GSP, but reject the mode: nothing enables DSC in the
+ * display engine or the sink yet, and committing one hangs the core channel.
  */
 static int
 nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
@@ -486,8 +500,12 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
 	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
 	struct nouveau_drm *drm = nouveau_drm(encoder->dev);
+	struct nv50_disp *disp = nv50_disp(encoder->dev);
+	struct drm_dsc_config *dsc = &asyh->dsc;
 	struct nv50_dp_dsc_imp imp = {};
 	unsigned int max_rate, mode_rate;
+	u32 bpp_x16;
+	int head, ntiles;
 	u8 bpc;
 	int ret;
 
@@ -501,16 +519,48 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	if (mode_rate <= max_rate || !outp->dp.dsc.supported)
 		return 0;
 
+	/* Tiles needed to reach this pixel clock, assuming HEAD_CLK_CAP is a
+	 * per-tile limit.  NVIDIA asks RM IMP instead (IS_MODE_POSSIBLE).
+	 */
+	head = nv50_head(crtc_state->crtc)->base.index;
+	ntiles = disp->head_max_khz[head] ?
+		 DIV_ROUND_UP(mode->clock, disp->head_max_khz[head]) : 1;
+
 	/* fix_depth already gave up at 6bpc; compress from the sink's depth. */
 	bpc = clamp_t(u8, conn_state->connector->display_info.bpc, 8, 10);
 
-	ret = nv50_dp_dsc_calc_imp(outp, nv50_head(crtc_state->crtc)->base.index,
-				   mode, bpc, &imp);
-	NV_INFO(drm, "%s: DSC %dx%d@%dkHz %dbpc -> %d/16bpp on %dx%d: ret %d possible %d wm %d tu %d hblank %d vblank %d\n",
+	bpp_x16 = nv50_dp_dsc_bpp_x16(outp, mode->clock, bpc);
+	if (!bpp_x16) {
+		NV_ERROR(drm, "%s: %dx%d@%dkHz doesn't fit %dx%d even at 8bpp DSC\n",
+			 encoder->name, mode->hdisplay, mode->vdisplay,
+			 mode->clock, outp->dp.link_nr, outp->dp.link_bw);
+		return -EINVAL;
+	}
+
+	ret = nouveau_dp_dsc_compute_config(outp, mode, bpc, bpp_x16, dsc);
+	if (ret) {
+		NV_ERROR(drm, "%s: no DSC config for %dx%d %dbpc -> %d/16bpp: %d\n",
+			 encoder->name, mode->hdisplay, mode->vdisplay,
+			 bpc, bpp_x16, ret);
+		return ret;
+	}
+
+	/* Each tile compresses whole slices, at most 4 (GetTileWidth()). */
+	if (dsc->slice_count % ntiles || dsc->slice_count / ntiles > 4) {
+		NV_ERROR(drm, "%s: %d DSC slices don't split across %d tiles\n",
+			 encoder->name, dsc->slice_count, ntiles);
+		return -EINVAL;
+	}
+
+	ret = nv50_dp_dsc_calc_imp(outp, head, mode, dsc, &imp);
+	NV_INFO(drm, "%s: DSC %dx%d@%dkHz %dbpc -> %d/16bpp, %d tiles x %d slices of %dx%d, on %dx%d: ret %d possible %d wm %d tu %d hblank %d vblank %d\n",
 		encoder->name, mode->hdisplay, mode->vdisplay, mode->clock,
-		bpc, imp.bpp_x16, outp->dp.link_nr, outp->dp.link_bw,
+		bpc, bpp_x16, ntiles, dsc->slice_count / ntiles,
+		dsc->slice_width, dsc->slice_height,
+		outp->dp.link_nr, outp->dp.link_bw,
 		ret, imp.possible, imp.water_mark, imp.tu_size,
 		imp.h_blank_sym, imp.v_blank_sym);
+	nv50_dp_dsc_dump(drm, dsc);
 
 	NV_ERROR(drm, "%s: %dx%d needs DSC, which isn't implemented yet\n",
 		 encoder->name, mode->hdisplay, mode->vdisplay);
@@ -1761,7 +1811,7 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 
 		ret = nv50_dp_dsc_calc_imp(outp, head->base.index,
 					   &asyh->state.adjusted_mode,
-					   asyh->or.bpc, &imp);
+					   &asyh->dsc, &imp);
 		if (ret || !imp.possible)
 			return false;
 
@@ -3001,6 +3051,34 @@ nv50_display_create(struct drm_device *dev)
 		ret = disp->core->func->caps_init(drm, disp);
 		if (ret)
 			goto out;
+	}
+
+	/* Blackwell drives a pixel clock above HEAD_CLK_CAP.PCLK_MAX (10MHz
+	 * units, clca73.h) by giving one head several tiles (HEAD_SET_TILE_MASK),
+	 * each scanning a strip of the line.  Log the tile caps: SYS_CAPC has
+	 * TILEn_EXISTS in 7:0 and TILEn_SUPPORT_MULTI_TILE in 15:8,
+	 * IHUB_COMMON_CAPF has PHYWINn_SUPPORT_MULTI_TILE, POSTCOMP_HDR_CAPA(n)
+	 * bit 18 is the tile's scaler.
+	 */
+	if (disp->disp->object.oclass >= GB202_DISP) {
+		u32 capc = nvif_rd32(&disp->caps, 0x20);
+
+		for_each_set_bit(i, &disp->disp->head_mask, ARRAY_SIZE(disp->head_max_khz)) {
+			u32 cap = nvif_rd32(&disp->caps, 0x5e8 + i * 4);
+
+			disp->head_max_khz[i] = (cap & 0xff) * 10000;
+			NV_INFO(drm, "head-%d: pclk %d-%d MHz\n", i,
+				((cap >> 8) & 0xff) * 10, (cap & 0xff) * 10);
+		}
+
+		NV_INFO(drm, "tiles: SYS_CAPC 0x%08x IHUB_COMMON_CAPF 0x%08x\n",
+			capc, nvif_rd32(&disp->caps, 0x28));
+		for (i = 0; i < 8; i++) {
+			if (capc & BIT(i))
+				NV_INFO(drm, "tile-%d: multi-tile %d POSTCOMP_HDR_CAPA 0x%08x\n",
+					i, !!(capc & BIT(8 + i)),
+					nvif_rd32(&disp->caps, 0x680 + i * 32));
+		}
 	}
 
 	/* Assign the correct format modifiers */

@@ -247,6 +247,12 @@ r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
 
 	*pmst = ctrl->bIsMultistreamSupported;
 	*pwm = ctrl->bHasIncreasedWatermarkLimits;
+	nvkm_info(&disp->engine.subdev,
+		  "DP DSC caps: supported %d formats 0x%x linebuf %dKB/%dbit ratebuf %dKB bpp precision %d max slices %d\n",
+		  ctrl->DSC.bDscSupported, ctrl->DSC.encoderColorFormatMask,
+		  ctrl->DSC.lineBufferSizeKB, ctrl->DSC.lineBufferBitDepth,
+		  ctrl->DSC.rateBufferSizeKB, ctrl->DSC.bitsPerPixelPrecision,
+		  ctrl->DSC.maxNumHztSlices);
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }

@@ -2,6 +2,7 @@
 #define __NV50_KMS_ATOM_H__
 #define nv50_atom(p) container_of((p), struct nv50_atom, state)
 #include <drm/drm_atomic.h>
+#include <drm/display/drm_dsc.h>
 #include "crc.h"
 
 struct nouveau_encoder;
@@ -125,6 +126,9 @@ struct nv50_head_atom {
 		 */
 		bool dsc;
 	} or;
+
+	/* PPS contents when or.dsc, from nv50_outp_atomic_check_dsc() */
+	struct drm_dsc_config dsc;
 
 	struct nv50_crc_atom crc;
 
