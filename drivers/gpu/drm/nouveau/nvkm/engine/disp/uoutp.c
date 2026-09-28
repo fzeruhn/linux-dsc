@@ -128,7 +128,7 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	params.dsc_version_minor = args->v0.dsc_version_minor;
 	params.link_rate_10m = args->v0.link_rate_10m;
 	params.lane_count = args->v0.lane_count;
-	params.b_enhanced_framing = args->v0.b_enhanced_framing;
+	params.enhanced_framing = args->v0.enhanced_framing;
 	params.raster_width = args->v0.raster_width;
 	params.raster_height = args->v0.raster_height;
 	params.surface_width = args->v0.surface_width;
@@ -139,7 +139,7 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	params.pixel_frequency_khz = args->v0.pixel_frequency_khz;
 	params.bits_per_component = args->v0.bits_per_component;
 	params.color_format = args->v0.color_format;
-	params.b_dsc_enabled = args->v0.b_dsc_enabled;
+	params.dsc_enabled = args->v0.dsc_enabled;
 
 	ret = ior->func->dp->calc_imp(disp, &params);
 	if (ret)
@@ -151,7 +151,7 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	args->v0.h_blank_sym = params.h_blank_sym;
 	args->v0.v_blank_sym = params.v_blank_sym;
 	args->v0.effective_bpp = params.effective_bpp;
-	args->v0.b_is_mode_possible = params.b_is_mode_possible;
+	args->v0.mode_possible = params.mode_possible;
 	return 0;
 }
 

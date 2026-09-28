@@ -16,7 +16,7 @@ struct nvkm_dp_calc_imp {
 	/* Link config */
 	u32    link_rate_10m;
 	u32    lane_count;
-	bool   b_enhanced_framing;
+	bool   enhanced_framing;
 	/* Modeset info */
 	u32    raster_width;
 	u32    raster_height;
@@ -28,7 +28,7 @@ struct nvkm_dp_calc_imp {
 	u32    pixel_frequency_khz;
 	u32    bits_per_component;
 	u32    color_format;
-	bool   b_dsc_enabled;
+	bool   dsc_enabled;
 	/* Watermark (out) */
 	u32    water_mark;
 	u32    tu_size;
@@ -36,7 +36,7 @@ struct nvkm_dp_calc_imp {
 	u32    h_blank_sym;
 	u32    v_blank_sym;
 	u32    effective_bpp;
-	bool   b_is_mode_possible;
+	bool   mode_possible;
 };
 
 struct nvkm_ior {

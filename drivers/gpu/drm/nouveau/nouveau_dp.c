@@ -22,6 +22,8 @@
  * Authors: Ben Skeggs
  */
 
+#include <linux/string_choices.h>
+
 #include <drm/display/drm_dp_helper.h>
 #include <drm/display/drm_dsc_helper.h>
 
@@ -30,11 +32,16 @@
 #include "nouveau_encoder.h"
 #include "nouveau_crtc.h"
 
+#include <nvif/class.h>
 #include <nvif/if0011.h>
 
 MODULE_PARM_DESC(mst, "Enable DisplayPort multi-stream (default: enabled)");
 static int nouveau_mst = 1;
 module_param_named(mst, nouveau_mst, int, 0400);
+
+MODULE_PARM_DESC(dsc, "Enable DisplayPort DSC on GB20x (experimental, default: disabled)");
+static int nouveau_dsc;
+module_param_named(dsc, nouveau_dsc, int, 0400);
 
 static bool
 nouveau_dp_has_sink_count(struct drm_connector *connector,
@@ -126,22 +133,18 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 		}
 	}
 
-	/* DSC sink caps (DP 1.4+), DPCD 0x60-0x6F */
-	if (dpcd[DP_DPCD_REV] >= 0x14) {
-		u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE];
+	/* Only GB20x heads can compress (headca7d_dsc()). */
+	outp->dp.dsc.supported = false;
+	if (nouveau_dsc && dpcd[DP_DPCD_REV] >= DP_DPCD_REV_14 &&
+	    nouveau_display(connector->dev)->disp.object.oclass >= GB202_DISP) {
+		u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
 
 		ret = drm_dp_dpcd_read(aux, DP_DSC_SUPPORT, dsc_dpcd,
-					sizeof(dsc_dpcd));
-		if (ret == sizeof(dsc_dpcd)) {
-			if (memcmp(outp->dp.dsc.dsc_dpcd, dsc_dpcd,
-				   sizeof(dsc_dpcd)))
-				NV_INFO(nouveau_drm(connector->dev),
-					"%s: DSC DPCD %*ph\n", connector->name,
-					(int)sizeof(dsc_dpcd), dsc_dpcd);
-			memcpy(outp->dp.dsc.dsc_dpcd, dsc_dpcd,
-			       sizeof(dsc_dpcd));
-			outp->dp.dsc.supported =
-				drm_dp_sink_supports_dsc(dsc_dpcd);
+				       DP_DSC_RECEIVER_CAP_SIZE);
+		if (ret == DP_DSC_RECEIVER_CAP_SIZE) {
+			NV_DEBUG(nouveau_drm(connector->dev), "%s: DSC caps %*ph\n",
+				 connector->name, DP_DSC_RECEIVER_CAP_SIZE, dsc_dpcd);
+			outp->dp.dsc.supported = drm_dp_sink_supports_dsc(dsc_dpcd);
 		}
 	}
 
@@ -355,11 +358,11 @@ nouveau_dp_dsc_enable(struct nouveau_encoder *outp, bool enable)
 
 	ret = drm_dp_dpcd_writeb(aux, DP_DSC_ENABLE, enable ? DP_DECOMPRESSION_EN : 0);
 	fec = drm_dp_dpcd_writeb(aux, DP_FEC_CONFIGURATION, enable ? DP_FEC_READY : 0);
-	NV_INFO(drm, "%s: sink DSC and FEC_READY %s: %d %d\n", outp->base.base.name,
-		enable ? "on" : "off", ret, fec);
+	if (ret != 1 || fec != 1)
+		NV_ERROR(drm, "%s: failed to turn sink DSC %s: %d %d\n",
+			 outp->base.base.name, str_on_off(enable), ret, fec);
 	outp->dp.dsc.enabled = enable && ret == 1 && fec == 1;
 }
-
 
 static bool
 nouveau_dp_train_link(struct nouveau_encoder *outp, bool retrain)
@@ -701,9 +704,10 @@ nv50_dp_mode_valid(struct nouveau_encoder *outp,
 		clock *= 2;
 
 	/* A sink with DSC can take the mode compressed down to 8bpp, the DSC
-	 * floor; nv50_outp_atomic_check_dsc() validates it with GSP.
+	 * floor; nv50_outp_atomic_check_dsc() validates it with GSP.  MST
+	 * streams aren't compressed yet.
 	 */
-	if (outp->dp.dsc.supported)
+	if (outp->dp.dsc.supported && !(outp->dp.mstm && outp->dp.mstm->is_mst))
 		bpp = 8;
 
 	max_rate = outp->dp.link_nr * outp->dp.link_bw;

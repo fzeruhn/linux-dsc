@@ -152,9 +152,9 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 	ctrl->headIndex = params->head;
 	ctrl->linkConfig.linkRate10M = params->link_rate_10m;
 	ctrl->linkConfig.laneCount = params->lane_count;
-	ctrl->linkConfig.bEnhancedFraming = params->b_enhanced_framing;
+	ctrl->linkConfig.bEnhancedFraming = params->enhanced_framing;
 	/* DSC over 8b/10b SST needs FEC (nvkms enables it with DSC) */
-	ctrl->linkConfig.bFECEnabled = params->b_dsc_enabled;
+	ctrl->linkConfig.bFECEnabled = params->dsc_enabled;
 	ctrl->modesetInfo.rasterWidth = params->raster_width;
 	ctrl->modesetInfo.rasterHeight = params->raster_height;
 	ctrl->modesetInfo.surfaceWidth = params->surface_width;
@@ -165,7 +165,7 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 	ctrl->modesetInfo.pixelFrequencyKHz = params->pixel_frequency_khz;
 	ctrl->modesetInfo.bitsPerComponent = params->bits_per_component;
 	ctrl->modesetInfo.colorFormat = params->color_format;
-	ctrl->modesetInfo.bDSCEnabled = params->b_dsc_enabled;
+	ctrl->modesetInfo.bDSCEnabled = params->dsc_enabled;
 	ctrl->dscInfo.sliceCount = params->slice_count;
 	ctrl->dscInfo.sliceWidth = params->slice_width;
 	ctrl->dscInfo.sliceHeight = params->slice_height;
@@ -184,7 +184,7 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 	params->h_blank_sym = ctrl->watermark.hBlankSym;
 	params->v_blank_sym = ctrl->watermark.vBlankSym;
 	params->effective_bpp = ctrl->watermark.effectiveBpp;
-	params->b_is_mode_possible = ctrl->watermark.bIsModePossible;
+	params->mode_possible = ctrl->watermark.bIsModePossible;
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }
@@ -249,12 +249,13 @@ r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
 
 	*pmst = ctrl->bIsMultistreamSupported;
 	*pwm = ctrl->bHasIncreasedWatermarkLimits;
-	nvkm_info(&disp->engine.subdev,
-		  "DP DSC caps: supported %d formats 0x%x linebuf %dKB/%dbit ratebuf %dKB bpp precision %d max slices %d\n",
-		  ctrl->DSC.bDscSupported, ctrl->DSC.encoderColorFormatMask,
-		  ctrl->DSC.lineBufferSizeKB, ctrl->DSC.lineBufferBitDepth,
-		  ctrl->DSC.rateBufferSizeKB, ctrl->DSC.bitsPerPixelPrecision,
-		  ctrl->DSC.maxNumHztSlices);
+	nvkm_debug(&disp->engine.subdev,
+		   "DSC: supported %d formats 0x%x linebuf %dKB/%dbit ratebuf %dKB\n",
+		   ctrl->DSC.bDscSupported, ctrl->DSC.encoderColorFormatMask,
+		   ctrl->DSC.lineBufferSizeKB, ctrl->DSC.lineBufferBitDepth,
+		   ctrl->DSC.rateBufferSizeKB);
+	nvkm_debug(&disp->engine.subdev, "DSC: bpp precision %d max slices %d\n",
+		   ctrl->DSC.bitsPerPixelPrecision, ctrl->DSC.maxNumHztSlices);
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }

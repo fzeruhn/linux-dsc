@@ -408,16 +408,6 @@ nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *c
 	}
 }
 
-struct nv50_dp_dsc_imp {
-	u32 water_mark;
-	u32 tu_size;
-	u32 min_h_blank;
-	u32 h_blank_sym;
-	u32 v_blank_sym;
-	u32 effective_bpp;
-	bool possible;
-};
-
 /* Compressed bpp (in 1/16 bpp) for a DSC stream: the highest bpp that the
  * DRM rate-control tables cover (8, 10, 12, 15), is at most 2:1, and fits
  * the link with ~3% headroom.  0 if even 8bpp won't fit.
@@ -444,60 +434,43 @@ static int
 nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
 		     const struct drm_display_mode *adjusted_mode,
 		     const struct drm_dsc_config *dsc,
-		     struct nv50_dp_dsc_imp *imp)
+		     struct nvif_outp_dp_calc_imp_v0 *imp)
 {
-	bool ef = outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP;
 	struct drm_display_mode mode;
-	u32 blanke, blanks;
 
 	drm_mode_copy(&mode, adjusted_mode);
 	drm_mode_set_crtcinfo(&mode, CRTC_INTERLACE_HALVE_V);
 
+	memset(imp, 0, sizeof(*imp));
+	imp->head = head;
+	imp->slice_count = dsc->slice_count;
+	imp->slice_width = dsc->slice_width;
+	imp->slice_height = dsc->slice_height;
+	imp->dsc_version_major = dsc->dsc_version_major;
+	imp->dsc_version_minor = dsc->dsc_version_minor;
+	imp->link_rate_10m = outp->dp.link_bw / 1000;
+	imp->lane_count = outp->dp.link_nr;
+	imp->enhanced_framing = outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP;
+	imp->raster_width = mode.crtc_htotal;
+	imp->raster_height = mode.crtc_vtotal;
+	imp->surface_width = mode.crtc_hdisplay;
+	imp->surface_height = mode.crtc_vdisplay;
 	/* Same raster convention as nv50_head_atomic_check_mode(). */
-	blanke = mode.crtc_hblank_end - mode.crtc_hsync_start - 1;
-	blanks = blanke + mode.crtc_hdisplay;
+	imp->raster_blank_end_x = mode.crtc_hblank_end - mode.crtc_hsync_start - 1;
+	imp->raster_blank_start_x = imp->raster_blank_end_x + mode.crtc_hdisplay;
+	/* compressed depth, in 1/16 bpp like bits_per_pixel */
+	imp->depth = dsc->bits_per_pixel;
+	imp->pixel_frequency_khz = mode.clock;
+	imp->bits_per_component = dsc->bits_per_component;
+	imp->color_format = 0; /* RGB */
+	imp->dsc_enabled = true;
 
-	return nvif_outp_dp_calc_imp(&outp->outp, head,
-				     dsc->slice_count, dsc->slice_width,
-				     dsc->slice_height,
-				     dsc->dsc_version_major,
-				     dsc->dsc_version_minor,
-				     outp->dp.link_bw / 1000, /* 10Mbps units */
-				     outp->dp.link_nr, ef,
-				     mode.crtc_htotal, mode.crtc_vtotal,
-				     mode.crtc_hdisplay, mode.crtc_vdisplay,
-				     blanks, blanke,
-				     dsc->bits_per_pixel, /* DSC depth is bpp * 16 */
-				     mode.clock, dsc->bits_per_component,
-				     0, /* colorFormat: RGB */
-				     true,
-				     &imp->water_mark, &imp->tu_size,
-				     &imp->min_h_blank, &imp->h_blank_sym,
-				     &imp->v_blank_sym, &imp->effective_bpp,
-				     &imp->possible);
+	return nvif_outp_dp_calc_imp(&outp->outp, imp);
 }
-
-static void
-nv50_dp_dsc_dump(struct nouveau_drm *drm, const struct drm_dsc_config *dsc)
-{
-	struct drm_printer p = drm_info_printer(drm->dev->dev);
-	struct drm_dsc_picture_parameter_set pps;
-	const u8 *data = (const u8 *)&pps;
-
-	drm_dsc_dump_config(&p, 1, dsc);
-
-	drm_dsc_pps_payload_pack(&pps, dsc);
-	for (int i = 0; i < sizeof(pps); i += 32)
-		NV_INFO(drm, "PPS %02x: %*ph\n", i, 32, data + i);
-}
-
-MODULE_PARM_DESC(dsc, "Drive DP modes that only fit compressed with DSC (GB20x, experimental; default: 0)");
-static int nv50_dsc;
-module_param_named(dsc, nv50_dsc, int, 0644);
 
 /* Modes that only fit the link compressed: build the DSC config, check it
  * with GSP, and drive the mode as a DSC stream through as many tiles as the
- * pixel clock needs.  Rejected unless nouveau.dsc is set.
+ * pixel clock needs.
  */
 static int
 nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
@@ -510,7 +483,7 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	struct nouveau_drm *drm = nouveau_drm(encoder->dev);
 	struct nv50_disp *disp = nv50_disp(encoder->dev);
 	struct drm_dsc_config *dsc = &asyh->dsc;
-	struct nv50_dp_dsc_imp imp = {};
+	struct nvif_outp_dp_calc_imp_v0 imp;
 	unsigned int max_rate, mode_rate;
 	u32 bpp_x16;
 	int head, ntiles;
@@ -540,46 +513,45 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 
 	bpp_x16 = nv50_dp_dsc_bpp_x16(outp, mode->clock, bpc);
 	if (!bpp_x16) {
-		NV_ERROR(drm, "%s: %dx%d@%dkHz doesn't fit %dx%d even at 8bpp DSC\n",
-			 encoder->name, mode->hdisplay, mode->vdisplay,
-			 mode->clock, outp->dp.link_nr, outp->dp.link_bw);
+		NV_ATOMIC(drm, "%s: %dx%d@%dkHz doesn't fit %dx%d even at 8bpp DSC\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay,
+			  mode->clock, outp->dp.link_nr, outp->dp.link_bw);
 		return -EINVAL;
 	}
 
 	ret = nouveau_dp_dsc_compute_config(outp, mode, bpc, bpp_x16, dsc);
 	if (ret) {
-		NV_ERROR(drm, "%s: no DSC config for %dx%d %dbpc -> %d/16bpp: %d\n",
-			 encoder->name, mode->hdisplay, mode->vdisplay,
-			 bpc, bpp_x16, ret);
+		NV_ATOMIC(drm, "%s: no DSC config for %dx%d %dbpc -> %d/16bpp: %d\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay,
+			  bpc, bpp_x16, ret);
 		return ret;
 	}
 
 	/* Each tile compresses whole slices, at most 4 (GetTileWidth()). */
 	if (dsc->slice_count % ntiles || dsc->slice_count / ntiles > 4) {
-		NV_ERROR(drm, "%s: %d DSC slices don't split across %d tiles\n",
-			 encoder->name, dsc->slice_count, ntiles);
+		NV_ATOMIC(drm, "%s: %d DSC slices don't split across %d tiles\n",
+			  encoder->name, dsc->slice_count, ntiles);
 		return -EINVAL;
 	}
 
 	ret = nv50_dp_dsc_calc_imp(outp, head, mode, dsc, &imp);
-	NV_INFO(drm, "%s: DSC %dx%d@%dkHz %dbpc -> %d/16bpp, %d tiles x %d slices of %dx%d, on %dx%d: ret %d possible %d wm %d tu %d hblank %d vblank %d\n",
-		encoder->name, mode->hdisplay, mode->vdisplay, mode->clock,
-		bpc, bpp_x16, ntiles, dsc->slice_count / ntiles,
-		dsc->slice_width, dsc->slice_height,
-		outp->dp.link_nr, outp->dp.link_bw,
-		ret, imp.possible, imp.water_mark, imp.tu_size,
-		imp.h_blank_sym, imp.v_blank_sym);
-	nv50_dp_dsc_dump(drm, dsc);
+	NV_ATOMIC(drm, "%s: DSC %dx%d@%dkHz %dbpc -> %d/16bpp, %d tile(s) x %d slice(s) of %dx%d\n",
+		  encoder->name, mode->hdisplay, mode->vdisplay, mode->clock,
+		  bpc, bpp_x16, ntiles, dsc->slice_count / ntiles,
+		  dsc->slice_width, dsc->slice_height);
+	NV_ATOMIC(drm, "%s: IMP on %dx%d: %d possible %d wm %d tu %d hblank %d vblank %d\n",
+		  encoder->name, outp->dp.link_nr, outp->dp.link_bw,
+		  ret, imp.mode_possible, imp.water_mark, imp.tu_size,
+		  imp.h_blank_sym, imp.v_blank_sym);
+	if (drm_debug_enabled(DRM_UT_ATOMIC)) {
+		struct drm_printer p = drm_dbg_printer(encoder->dev, DRM_UT_ATOMIC, "dsc");
 
-	if (ret || !imp.possible) {
-		NV_ERROR(drm, "%s: %dx%d doesn't fit the link as DSC either\n",
-			 encoder->name, mode->hdisplay, mode->vdisplay);
-		return -EINVAL;
+		drm_dsc_dump_config(&p, 1, dsc);
 	}
 
-	if (!nv50_dsc) {
-		NV_ERROR(drm, "%s: %dx%d needs DSC, which is off (nouveau.dsc=0)\n",
-			 encoder->name, mode->hdisplay, mode->vdisplay);
+	if (ret || !imp.mode_possible) {
+		NV_ATOMIC(drm, "%s: %dx%d doesn't fit the link as DSC either\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay);
 		return -EINVAL;
 	}
 
@@ -1827,15 +1799,15 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 		watermarkMinimum = DP_CONFIG_INCREASED_WATERMARK_LIMIT;
 	}
 
-	// DSC: use GSP to calculate watermark
+	/* With DSC, have GSP calculate the watermark instead. */
 	if (bEnableDsc) {
-		struct nv50_dp_dsc_imp imp;
+		struct nvif_outp_dp_calc_imp_v0 imp;
 		int ret;
 
 		ret = nv50_dp_dsc_calc_imp(outp, head->base.index,
 					   &asyh->state.adjusted_mode,
 					   &asyh->dsc, &imp);
-		if (ret || !imp.possible)
+		if (ret || !imp.mode_possible)
 			return false;
 
 		return nvif_outp_dp_sst(&outp->outp, head->base.index,
@@ -2468,10 +2440,8 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 		if (core->func->tile.prepare(core, ntiles, active, busy)) {
 			u32 core_only[NV50_DISP_INTERLOCK__SIZE] = {};
 
-			NV_INFO(drm, "tiles: heads %02x %02x %02x %02x phywins %02x %02x %02x %02x %02x %02x %02x %02x\n",
-				core->tiles[0], core->tiles[1], core->tiles[2], core->tiles[3],
-				core->phywin[0], core->phywin[1], core->phywin[2], core->phywin[3],
-				core->phywin[4], core->phywin[5], core->phywin[6], core->phywin[7]);
+			NV_ATOMIC(drm, "tiles %*ph, phywins %*ph\n",
+				  4, core->tiles, 8, core->phywin);
 			core->func->ntfy_init(disp->sync, NV50_DISP_CORE_NTFY);
 			core->func->update(core, core_only, true);
 			if (core->func->ntfy_wait_done(disp->sync, NV50_DISP_CORE_NTFY,
@@ -2594,11 +2564,11 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 				NV_ERROR(drm, "%s: phywins for %d tile(s) still in use\n",
 					 crtc->name, ntiles[h]);
 			else if (ret || ntiles[h] > 1)
-				NV_INFO(drm, "%s: %d tile(s), 0x%02x, phywins 0x%02x/0x%02x, width %d+%d\n",
-					crtc->name, ntiles[h], core->tiles[h],
-					core->phywin[h * 2], core->phywin[h * 2 + 1],
-					ntiles[h] > 1 ? width0 : width,
-					ntiles[h] > 1 ? width - width0 : 0);
+				NV_ATOMIC(drm, "%s: tiles 0x%02x phywins 0x%02x/0x%02x width %d+%d\n",
+					  crtc->name, core->tiles[h],
+					  core->phywin[h * 2], core->phywin[h * 2 + 1],
+					  ntiles[h] > 1 ? width0 : width,
+					  ntiles[h] > 1 ? width - width0 : 0);
 			interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 		}
 
@@ -3269,17 +3239,17 @@ nv50_display_create(struct drm_device *dev)
 			u32 cap = nvif_rd32(&disp->caps, 0x5e8 + i * 4);
 
 			disp->head_max_khz[i] = (cap & 0xff) * 10000;
-			NV_INFO(drm, "head-%d: pclk %d-%d MHz\n", i,
-				((cap >> 8) & 0xff) * 10, (cap & 0xff) * 10);
+			NV_DEBUG(drm, "head-%d: pclk %d-%d MHz\n", i,
+				 ((cap >> 8) & 0xff) * 10, (cap & 0xff) * 10);
 		}
 
-		NV_INFO(drm, "tiles: SYS_CAPC 0x%08x IHUB_COMMON_CAPF 0x%08x\n",
-			capc, nvif_rd32(&disp->caps, 0x28));
+		NV_DEBUG(drm, "tiles: SYS_CAPC 0x%08x IHUB_COMMON_CAPF 0x%08x\n",
+			 capc, nvif_rd32(&disp->caps, 0x28));
 		for (i = 0; i < 8; i++) {
 			if (capc & BIT(i))
-				NV_INFO(drm, "tile-%d: multi-tile %d POSTCOMP_HDR_CAPA 0x%08x\n",
-					i, !!(capc & BIT(8 + i)),
-					nvif_rd32(&disp->caps, 0x680 + i * 32));
+				NV_DEBUG(drm, "tile-%d: multi-tile %d POSTCOMP_HDR_CAPA 0x%08x\n",
+					 i, !!(capc & BIT(8 + i)),
+					 nvif_rd32(&disp->caps, 0x680 + i * 32));
 		}
 	}
 

@@ -84,9 +84,9 @@ struct nouveau_encoder {
 
 			u8 dpcd[DP_RECEIVER_CAP_SIZE];
 
-			/* DSC sink caps, read from DPCD 0x60-0x6F */
 			struct {
 				u8 dsc_dpcd[DP_DSC_RECEIVER_CAP_SIZE];
+				/* both the sink and the GPU can do DSC */
 				bool supported;
 				/* sink's DP_DSC_ENABLE is set */
 				bool enabled;

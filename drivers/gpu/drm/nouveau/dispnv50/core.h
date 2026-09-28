@@ -17,7 +17,7 @@ struct nv50_core {
 	 * window, as last pushed (coreca7d)
 	 */
 	u8 tiles[8];
-	u32 phywin[8];
+	u8 phywin[8];
 };
 
 int nv50_core_new(struct nouveau_drm *, struct nv50_core **);

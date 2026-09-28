@@ -48,6 +48,8 @@ void nvkm_dp_enable(struct nvkm_outp *, bool auxpwr);
 #define DPCD_LC10_LANE2_POST_CURSOR2_SET                                   0x03
 #define DPCD_LC15_LINK_RATE_SET                                         0x00115
 #define DPCD_LC15_LINK_RATE_SET_MASK                                       0x07
+#define DPCD_LC20                                                       0x00120
+#define DPCD_LC20_FEC_READY                                                0x01
 
 /* DPCD Link/Sink Status */
 #define DPCD_LS02                                                       0x00202
@@ -83,6 +85,7 @@ void nvkm_dp_enable(struct nvkm_outp *, bool auxpwr);
 #define DPCD_LS0C_LANE2_POST_CURSOR2                                       0x30
 #define DPCD_LS0C_LANE1_POST_CURSOR2                                       0x0c
 #define DPCD_LS0C_LANE0_POST_CURSOR2                                       0x03
+#define DPCD_LS80                                                       0x00280
 
 /* DPCD Sink Control */
 #define DPCD_SC00                                                       0x00600

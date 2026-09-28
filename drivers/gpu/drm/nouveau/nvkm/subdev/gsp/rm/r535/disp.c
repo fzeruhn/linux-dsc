@@ -483,6 +483,10 @@ r535_sor_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 {
 	const struct nvkm_rm_api *rmapi = disp->engine.subdev.device->gsp->rm->api;
 
+	/* CALCULATE_DP_IMP was only imported for r570. */
+	if (!rmapi->disp->dp.calc_imp)
+		return -ENODEV;
+
 	return rmapi->disp->dp.calc_imp(disp, params);
 }
 
@@ -1083,21 +1087,21 @@ r535_dp_train(struct nvkm_outp *outp, bool retrain)
 		if (outp->dp.lt.post_adj)
 			OUTP_ERR(outp, "FEC after post-LT adjustment isn't supported");
 
-		/* Training leaves the sink's FEC_READY (DPCD 0x120) clear even
-		 * with ENABLE_FEC, and a sink that isn't FEC-ready ignores the
+		/* Training leaves the sink's FEC_READY clear even with
+		 * ENABLE_FEC, and a sink that isn't FEC-ready ignores the
 		 * FEC_DECODE_EN sequence the source sends when FEC goes on.
 		 */
-		r535_dp_dpcd(outp, false, 0x120, &cfg);
-		if (!(cfg & 0x01)) {
-			cfg |= 0x01;
-			r535_dp_dpcd(outp, true, 0x120, &cfg);
+		r535_dp_dpcd(outp, false, DPCD_LC20, &cfg);
+		if (!(cfg & DPCD_LC20_FEC_READY)) {
+			cfg |= DPCD_LC20_FEC_READY;
+			r535_dp_dpcd(outp, true, DPCD_LC20, &cfg);
 			cfg = 0;
-			r535_dp_dpcd(outp, false, 0x120, &cfg);
+			r535_dp_dpcd(outp, false, DPCD_LC20, &cfg);
 		}
 
 		ret = r535_dp_configure_fec(outp, true);
-		r535_dp_dpcd(outp, false, 0x280, &status);
-		OUTP_MSG(outp, info, "configure FEC: %d, sink FEC_READY 0x%02x status 0x%02x",
+		r535_dp_dpcd(outp, false, DPCD_LS80, &status);
+		OUTP_DBG(outp, "configure FEC: %d, sink FEC_READY 0x%02x status 0x%02x",
 			 ret, cfg, status);
 		if (ret)
 			return ret;

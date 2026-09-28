@@ -283,7 +283,7 @@ union nvif_outp_dp_calc_imp_args {
 		/* Link config */
 		__u32 link_rate_10m;
 		__u32 lane_count;
-		__u8  b_enhanced_framing;
+		__u8  enhanced_framing;
 		__u8  pad03[3];
 		/* Modeset info */
 		__u32 raster_width;
@@ -296,7 +296,7 @@ union nvif_outp_dp_calc_imp_args {
 		__u32 pixel_frequency_khz;
 		__u32 bits_per_component;
 		__u32 color_format;
-		__u8  b_dsc_enabled;
+		__u8  dsc_enabled;
 		__u8  pad04[3];
 		/* Watermark (output) */
 		__u32 water_mark;
@@ -305,7 +305,7 @@ union nvif_outp_dp_calc_imp_args {
 		__u32 h_blank_sym;
 		__u32 v_blank_sym;
 		__u32 effective_bpp;
-		__u8  b_is_mode_possible;
+		__u8  mode_possible;
 		__u8  pad05[3];
 	} v0;
 };
