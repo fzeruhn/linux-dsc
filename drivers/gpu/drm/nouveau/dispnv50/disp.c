@@ -229,10 +229,6 @@ MODULE_PARM_DESC(kms_vram_pushbuf, "Place EVO/NVD push buffers in VRAM (default:
 static int nv50_dmac_vram_pushbuf = -1;
 module_param_named(kms_vram_pushbuf, nv50_dmac_vram_pushbuf, int, 0400);
 
-MODULE_PARM_DESC(force_tiles, "Scan out through this many tiles (max 2) on each head, from its next modeset (GB20x, debug)");
-int nv50_force_tiles;
-module_param_named(force_tiles, nv50_force_tiles, int, 0644);
-
 int
 nv50_dmac_create(struct nouveau_drm *drm,
 		 const s32 *oclass, u8 head, void *data, u32 size, s64 syncbuf,
@@ -468,9 +464,40 @@ nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
 	return nvif_outp_dp_calc_imp(&outp->outp, imp);
 }
 
+/* Tiles the head needs to reach the mode's pixel clock, assuming
+ * HEAD_CLK_CAP is a per-tile limit.  NVIDIA asks RM IMP instead
+ * (IS_MODE_POSSIBLE).  Only GB20x reports a limit; elsewhere this is 1.
+ */
+static int
+nv50_outp_atomic_check_tiles(struct drm_encoder *encoder,
+			     struct drm_crtc_state *crtc_state)
+{
+	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+	struct nv50_disp *disp = nv50_disp(encoder->dev);
+	const int head = nv50_head(crtc_state->crtc)->base.index;
+	u32 max_khz = disp->head_max_khz[head];
+
+	asyh->or.tiles = 1;
+	if (!crtc_state->enable || !max_khz)
+		return 0;
+
+	asyh->or.tiles = DIV_ROUND_UP(mode->clock, max_khz);
+
+	/* coreca7d_tile_set() pairs each head with one spare tile. */
+	if (asyh->or.tiles > 2) {
+		NV_ATOMIC(nouveau_drm(encoder->dev),
+			  "%s: %dkHz needs %d tiles of %dkHz, at most 2 supported\n",
+			  encoder->name, mode->clock, asyh->or.tiles, max_khz);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 /* Modes that only fit the link compressed: build the DSC config, check it
- * with GSP, and drive the mode as a DSC stream through as many tiles as the
- * pixel clock needs.
+ * with GSP, and drive the mode as a DSC stream through the tiles
+ * nv50_outp_atomic_check_tiles() picked.
  */
 static int
 nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
@@ -481,17 +508,16 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
 	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
 	struct nouveau_drm *drm = nouveau_drm(encoder->dev);
-	struct nv50_disp *disp = nv50_disp(encoder->dev);
+	const int head = nv50_head(crtc_state->crtc)->base.index;
+	const int ntiles = asyh->or.tiles;
 	struct drm_dsc_config *dsc = &asyh->dsc;
 	struct nvif_outp_dp_calc_imp_v0 imp;
 	unsigned int max_rate, mode_rate;
 	u32 bpp_x16;
-	int head, ntiles;
-	u8 bpc;
+	u8 bpc, max_bpc;
 	int ret;
 
 	asyh->or.dsc = false;
-	asyh->or.tiles = 1;
 
 	if (outp->dcb->type != DCB_OUTPUT_DP || !crtc_state->enable)
 		return 0;
@@ -501,15 +527,16 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	if (mode_rate <= max_rate || !outp->dp.dsc.supported)
 		return 0;
 
-	/* Tiles needed to reach this pixel clock, assuming HEAD_CLK_CAP is a
-	 * per-tile limit.  NVIDIA asks RM IMP instead (IS_MODE_POSSIBLE).
+	/* fix_depth already gave up at 6bpc; compress from the sink's depth,
+	 * or the deepest below it that its decoder takes.
 	 */
-	head = nv50_head(crtc_state->crtc)->base.index;
-	ntiles = disp->head_max_khz[head] ?
-		 DIV_ROUND_UP(mode->clock, disp->head_max_khz[head]) : 1;
-
-	/* fix_depth already gave up at 6bpc; compress from the sink's depth. */
-	bpc = clamp_t(u8, conn_state->connector->display_info.bpc, 8, 10);
+	max_bpc = clamp_t(u8, conn_state->connector->display_info.bpc, 8, 10);
+	bpc = nouveau_dp_dsc_input_bpc(outp, max_bpc);
+	if (!bpc) {
+		NV_ATOMIC(drm, "%s: sink DSC decoder takes none of 8-%dbpc\n",
+			  encoder->name, max_bpc);
+		return -EINVAL;
+	}
 
 	bpp_x16 = nv50_dp_dsc_bpp_x16(outp, mode->clock, bpc);
 	if (!bpp_x16) {
@@ -558,7 +585,6 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 	/* The head and the OR carry the uncompressed pixels. */
 	asyh->or.dsc = true;
 	asyh->or.bpc = bpc;
-	asyh->or.tiles = ntiles;
 	return 0;
 }
 
@@ -582,6 +608,10 @@ nv50_outp_atomic_check(struct drm_encoder *encoder,
 
 	/* We might have to reduce the bpc */
 	nv50_outp_atomic_fix_depth(encoder, crtc_state);
+
+	ret = nv50_outp_atomic_check_tiles(encoder, crtc_state);
+	if (ret)
+		return ret;
 
 	return nv50_outp_atomic_check_dsc(encoder, crtc_state, conn_state);
 }
@@ -1139,6 +1169,12 @@ nv50_msto_atomic_check(struct drm_encoder *encoder,
 
 	if (!drm_atomic_crtc_needs_modeset(crtc_state))
 		return 0;
+
+	/* MST streams aren't compressed or tiled (nv50_outp_atomic_check_dsc()),
+	 * whatever this head last drove.
+	 */
+	asyh->or.dsc = false;
+	asyh->or.tiles = 1;
 
 	/*
 	 * When restoring duplicated states, we need to make sure that the bw
