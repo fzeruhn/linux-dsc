@@ -1070,6 +1070,16 @@ r535_dp_train(struct nvkm_outp *outp, bool retrain)
 {
 	int ret;
 
+	/* Nothing else turns FEC off again, so do it before training a link
+	 * that doesn't want it (switching from a DSC mode, or a new sink).
+	 */
+	if (!outp->dp.lt.fec && outp->dp.fec) {
+		ret = r535_dp_configure_fec(outp, false);
+		if (ret)
+			OUTP_ERR(outp, "failed to disable FEC: %d", ret);
+		outp->dp.fec = false;
+	}
+
 	for (int target = outp->dp.lttprs; target >= 0; target--) {
 		ret = r535_dp_train_target(outp, target, outp->dp.lt.mst,
 							 outp->dp.lt.nr,
@@ -1100,6 +1110,7 @@ r535_dp_train(struct nvkm_outp *outp, bool retrain)
 		}
 
 		ret = r535_dp_configure_fec(outp, true);
+		outp->dp.fec = !ret;
 		r535_dp_dpcd(outp, false, DPCD_LS80, &status);
 		OUTP_DBG(outp, "configure FEC: %d, sink FEC_READY 0x%02x status 0x%02x",
 			 ret, cfg, status);

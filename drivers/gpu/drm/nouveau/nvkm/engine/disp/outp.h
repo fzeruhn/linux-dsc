@@ -61,6 +61,9 @@ struct nvkm_outp {
 				bool post_adj;
 				bool fec;
 			} lt;
+
+			/* FEC is on at the GPU end of the link */
+			bool fec;
 		} dp;
 	};
 

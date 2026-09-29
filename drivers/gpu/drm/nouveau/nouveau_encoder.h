@@ -173,6 +173,7 @@ int nouveau_dp_detect(struct nouveau_connector *, struct nouveau_encoder *);
 bool nouveau_dp_train(struct nouveau_encoder *, bool mst, u32 khz, u8 bpc,
 		      u16 dsc_bpp_x16);
 void nouveau_dp_dsc_enable(struct nouveau_encoder *, bool enable);
+u8 nouveau_dp_dsc_input_bpc(struct nouveau_encoder *, u8 max_bpc);
 void nouveau_dp_power_down(struct nouveau_encoder *);
 bool nouveau_dp_link_check(struct nouveau_connector *);
 void nouveau_dp_irq(struct work_struct *);

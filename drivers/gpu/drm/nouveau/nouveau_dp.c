@@ -133,18 +133,23 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 		}
 	}
 
-	/* Only GB20x heads can compress (headca7d_dsc()). */
+	/* Only GB20x heads can compress (headca7d_dsc()), and DSC over DP
+	 * needs FEC, which nouveau_dp_train() always enables with it.
+	 */
 	outp->dp.dsc.supported = false;
 	if (nouveau_dsc && dpcd[DP_DPCD_REV] >= DP_DPCD_REV_14 &&
 	    nouveau_display(connector->dev)->disp.object.oclass >= GB202_DISP) {
 		u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
+		u8 fec = 0;
 
 		ret = drm_dp_dpcd_read(aux, DP_DSC_SUPPORT, dsc_dpcd,
 				       DP_DSC_RECEIVER_CAP_SIZE);
-		if (ret == DP_DSC_RECEIVER_CAP_SIZE) {
-			NV_DEBUG(nouveau_drm(connector->dev), "%s: DSC caps %*ph\n",
-				 connector->name, DP_DSC_RECEIVER_CAP_SIZE, dsc_dpcd);
-			outp->dp.dsc.supported = drm_dp_sink_supports_dsc(dsc_dpcd);
+		if (ret == DP_DSC_RECEIVER_CAP_SIZE &&
+		    drm_dp_dpcd_readb(aux, DP_FEC_CAPABILITY, &fec) == 1) {
+			NV_DEBUG(nouveau_drm(connector->dev), "%s: DSC caps %*ph FEC 0x%02x\n",
+				 connector->name, DP_DSC_RECEIVER_CAP_SIZE, dsc_dpcd, fec);
+			outp->dp.dsc.supported = drm_dp_sink_supports_dsc(dsc_dpcd) &&
+						 drm_dp_sink_supports_fec(fec);
 		}
 	}
 
@@ -569,6 +574,24 @@ nouveau_dp_irq(struct work_struct *work)
 	mutex_unlock(&outp->dp.hpd_irq_lock);
 
 	nouveau_connector_hpd(nv_connector, NVIF_CONN_EVENT_V0_IRQ | hpd);
+}
+
+/* Deepest input bpc, up to max_bpc, that the sink's DSC decoder takes.
+ * 0 if none.
+ */
+u8
+nouveau_dp_dsc_input_bpc(struct nouveau_encoder *outp, u8 max_bpc)
+{
+	u8 bpcs[3], bpc = 0;
+	int i, nr;
+
+	nr = drm_dp_dsc_sink_supported_input_bpcs(outp->dp.dsc.dsc_dpcd, bpcs);
+	for (i = 0; i < nr; i++) {
+		if (bpcs[i] <= max_bpc)
+			bpc = max(bpc, bpcs[i]);
+	}
+
+	return bpc;
 }
 
 /* Smallest slice count the sink advertises that keeps each slice within the
