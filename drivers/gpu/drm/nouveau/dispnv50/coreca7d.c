@@ -274,11 +274,59 @@ coreca7d_init(struct nv50_core *core)
 	return PUSH_KICK(push);
 }
 
+/* Pixel clock limits and multi-tile caps, as nvkms reads them
+ * (EvoParseCapabilityNotifierCA(), and nvkms-evo3.c for HEAD_CLK_CAP).  A
+ * head can take a second tile, 4 + head, when both its tiles support
+ * multi-tile and so do the phywins coreca7d_tile_phywin() gives it.
+ */
+static int
+coreca7d_caps_init(struct nouveau_drm *drm, struct nv50_disp *disp)
+{
+	u32 capc, capf, multi;
+	int ret, i;
+
+	ret = corec37d_caps_init(drm, disp);
+	if (ret)
+		return ret;
+
+	/* SYS_CAPC: TILEn_EXISTS in 7:0, TILEn_SUPPORT_MULTI_TILE in 15:8 */
+	capc = nvif_rd32(&disp->caps, 0x000020);
+	/* IHUB_COMMON_CAPF: PHYWINn_SUPPORT_MULTI_TILE in 7:0 */
+	capf = nvif_rd32(&disp->caps, 0x000028);
+	multi = capc & (capc >> 8) & 0xff;
+
+	for (i = 0; i < 8; i++) {
+		/* POSTCOMP_HDR_CAPA(i): SCLR_PRESENT and VFILTER_PRESENT */
+		const u32 scaler = BIT(18) | BIT(23);
+
+		if ((capc & BIT(i)) &&
+		    (nvif_rd32(&disp->caps, 0x000680 + i * 32) & scaler) == scaler)
+			disp->tile_scaler |= BIT(i);
+	}
+
+	for_each_set_bit(i, &disp->disp->head_mask, ARRAY_SIZE(disp->head_max_khz)) {
+		const int partner = i ^ 2;
+		const u32 tiles = BIT(i) | BIT(4 + i);
+		const u32 phywins = BIT(i * 2) | BIT(i * 2 + 1) |
+				    BIT(partner * 2) | BIT(partner * 2 + 1);
+
+		/* HEAD_CLK_CAP(i).PCLK_MAX, in 10MHz */
+		disp->head_max_khz[i] = (nvif_rd32(&disp->caps, 0x0005e8 + i * 4) & 0xff) * 10000;
+
+		if (i < 4 && (multi & tiles) == tiles && (capf & phywins) == phywins)
+			disp->tile_heads |= BIT(i);
+	}
+
+	NV_DEBUG(drm, "tiles: SYS_CAPC %08x IHUB_COMMON_CAPF %08x scaler %02x 2-tile heads %x\n",
+		 capc, capf, disp->tile_scaler, disp->tile_heads);
+	return 0;
+}
+
 static const struct nv50_core_func
 coreca7d = {
 	.init = coreca7d_init,
 	.ntfy_init = corec37d_ntfy_init,
-	.caps_init = corec37d_caps_init,
+	.caps_init = coreca7d_caps_init,
 	.caps_class = GB202_DISP_CAPS,
 	.ntfy_wait_done = corec37d_ntfy_wait_done,
 	.update = coreca7d_update,

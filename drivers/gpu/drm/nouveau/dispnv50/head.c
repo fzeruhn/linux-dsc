@@ -494,6 +494,8 @@ nv50_head_atomic_duplicate_state(struct drm_crtc *crtc)
 	asyh->procamp = armh->procamp;
 	asyh->crc = armh->crc;
 	asyh->or = armh->or;
+	asyh->tile = armh->tile;
+	asyh->dsc = armh->dsc;
 	asyh->dp = armh->dp;
 	asyh->clr.mask = 0;
 	asyh->set.mask = 0;

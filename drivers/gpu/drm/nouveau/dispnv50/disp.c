@@ -477,6 +477,7 @@ nv50_outp_atomic_check_tiles(struct drm_encoder *encoder,
 	struct nv50_disp *disp = nv50_disp(encoder->dev);
 	const int head = nv50_head(crtc_state->crtc)->base.index;
 	u32 max_khz = disp->head_max_khz[head];
+	int max_tiles;
 
 	asyh->or.tiles = 1;
 	if (!crtc_state->enable || !max_khz)
@@ -484,11 +485,15 @@ nv50_outp_atomic_check_tiles(struct drm_encoder *encoder,
 
 	asyh->or.tiles = DIV_ROUND_UP(mode->clock, max_khz);
 
-	/* coreca7d_tile_set() pairs each head with one spare tile. */
-	if (asyh->or.tiles > 2) {
+	/* coreca7d_tile_set() pairs each head with one spare tile, if the
+	 * hardware has it (coreca7d_caps_init()).
+	 */
+	max_tiles = (disp->tile_heads & BIT(head)) ? 2 : 1;
+	if (asyh->or.tiles > max_tiles) {
 		NV_ATOMIC(nouveau_drm(encoder->dev),
-			  "%s: %dkHz needs %d tiles of %dkHz, at most 2 supported\n",
-			  encoder->name, mode->clock, asyh->or.tiles, max_khz);
+			  "%s: %dkHz needs %d tiles of %dkHz, head-%d has %d\n",
+			  encoder->name, mode->clock, asyh->or.tiles, max_khz,
+			  head, max_tiles);
 		return -EINVAL;
 	}
 
@@ -2393,27 +2398,70 @@ nv50_disp_tiles(struct drm_crtc_state *crtc_state)
 	return max_t(int, nv50_head_atom(crtc_state)->tile.count, 1);
 }
 
-/* Tiles and activity of heads 0-3 as committed; crtc->state is already the
- * new state for the crtcs in the commit being applied.
+/* Tiles and activity of heads 0-3 after the commit, and which of them the
+ * hardware may still be scanning out from (busy): those active after the
+ * commit, and, unless their disable has already been flushed, those active
+ * before it.  Every head is in a modeset commit (nv50_disp_atomic_check_tiles());
+ * false if a head isn't, i.e. for a commit without a modeset.
  */
-static void
-nv50_disp_tile_state(struct drm_device *dev, int *ntiles, bool *active)
+static bool
+nv50_disp_tile_state(struct drm_atomic_commit *state, bool flushed,
+		     int *ntiles, bool *active, bool *busy)
 {
+	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
 	struct drm_crtc *crtc;
 
 	for (int i = 0; i < 4; i++) {
 		ntiles[i] = 1;
 		active[i] = false;
+		busy[i] = false;
 	}
 
-	drm_for_each_crtc(crtc, dev) {
+	drm_for_each_crtc(crtc, state->dev) {
 		const int i = nv50_head(crtc)->base.index;
 
-		if (i < 4) {
-			ntiles[i] = nv50_disp_tiles(crtc->state);
-			active[i] = crtc->state->active;
-		}
+		if (i >= 4)
+			continue;
+
+		old_crtc_state = drm_atomic_get_old_crtc_state(state, crtc);
+		new_crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+		if (!new_crtc_state)
+			return false;
+
+		ntiles[i] = nv50_disp_tiles(new_crtc_state);
+		active[i] = new_crtc_state->active;
+		busy[i] = active[i] || (!flushed && old_crtc_state->active);
 	}
+
+	return true;
+}
+
+/* Multi-tile, part 1: lend or take back the phywins of heads that are off,
+ * in a core update of its own ahead of the ones that attach them
+ * (coreca7d_tile_prepare()).  A head turned off by this commit only counts
+ * as off once its disable has been flushed.
+ */
+static void
+nv50_disp_atomic_commit_tiles(struct drm_atomic_commit *state, bool flushed)
+{
+	struct nouveau_drm *drm = nouveau_drm(state->dev);
+	struct nv50_disp *disp = nv50_disp(state->dev);
+	struct nv50_core *core = disp->core;
+	u32 core_only[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ntiles[4];
+	bool active[4], busy[4];
+
+	if (!core->func->tile.prepare ||
+	    !nv50_disp_tile_state(state, flushed, ntiles, active, busy) ||
+	    !core->func->tile.prepare(core, ntiles, active, busy))
+		return;
+
+	NV_ATOMIC(drm, "tiles %*ph, phywins %*ph\n", 4, core->tiles, 8, core->phywin);
+	core->func->ntfy_init(disp->sync, NV50_DISP_CORE_NTFY);
+	core->func->update(core, core_only, true);
+	if (core->func->ntfy_wait_done(disp->sync, NV50_DISP_CORE_NTFY,
+				       core->chan.base.device))
+		NV_ERROR(drm, "core notifier timeout (tiles)\n");
 }
 
 /* Width of the first of ntiles tiles: whole DSC slices, as many as the other
@@ -2446,7 +2494,7 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 	int i;
 	bool flushed = false;
 	int ntiles[4];
-	bool active[4];
+	bool active[4], busy[4];
 
 	NV_ATOMIC(drm, "commit %d %d\n", atom->lock_core, atom->flush_disable);
 	nv50_crc_atomic_stop_reporting(state);
@@ -2459,32 +2507,11 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 	if (atom->lock_core)
 		mutex_lock(&disp->mutex);
 
-	/* Multi-tile, part 1: lend or take back the phywins of heads that are
-	 * off before and after this commit, in a core update of its own ahead
-	 * of everything else (coreca7d_tile_prepare()).
+	/* Without a flush of the disables, lend phywins before anything else is
+	 * pushed; with one, after it (nv50_disp_atomic_check_tiles()).
 	 */
-	if (core->func->tile.prepare && atom->lock_core) {
-		bool busy[4];
-
-		nv50_disp_tile_state(dev, ntiles, active);
-		memcpy(busy, active, sizeof(busy));
-		for_each_old_crtc_in_state(state, crtc, old_crtc_state, i) {
-			if (nv50_head(crtc)->base.index < 4 && old_crtc_state->active)
-				busy[nv50_head(crtc)->base.index] = true;
-		}
-
-		if (core->func->tile.prepare(core, ntiles, active, busy)) {
-			u32 core_only[NV50_DISP_INTERLOCK__SIZE] = {};
-
-			NV_ATOMIC(drm, "tiles %*ph, phywins %*ph\n",
-				  4, core->tiles, 8, core->phywin);
-			core->func->ntfy_init(disp->sync, NV50_DISP_CORE_NTFY);
-			core->func->update(core, core_only, true);
-			if (core->func->ntfy_wait_done(disp->sync, NV50_DISP_CORE_NTFY,
-						       core->chan.base.device))
-				NV_ERROR(drm, "core notifier timeout (tiles)\n");
-		}
-	}
+	if (atom->lock_core && !atom->flush_disable)
+		nv50_disp_atomic_commit_tiles(state, false);
 
 	/* Disable head(s). */
 	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
@@ -2547,6 +2574,9 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 		}
 	}
 
+	if (atom->lock_core && atom->flush_disable)
+		nv50_disp_atomic_commit_tiles(state, flushed);
+
 	if (flushed)
 		nv50_crc_atomic_release_notifier_contexts(state);
 	nv50_crc_atomic_init_notifier_contexts(state);
@@ -2586,13 +2616,13 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 		 * line across the tiles.
 		 */
 		if (core->func->tile.set && new_crtc_state->active &&
-		    drm_atomic_crtc_needs_modeset(new_crtc_state)) {
+		    drm_atomic_crtc_needs_modeset(new_crtc_state) &&
+		    nv50_disp_tile_state(state, true, ntiles, active, busy)) {
 			const int h = head->base.index;
 			const u16 width = asyh->state.adjusted_mode.hdisplay;
 			u16 width0;
 			int ret;
 
-			nv50_disp_tile_state(dev, ntiles, active);
 			width0 = nv50_disp_tile_width0(asyh, ntiles[h]);
 
 			ret = core->func->tile.set(core, ntiles, active, h, width0, width);
@@ -2899,45 +2929,78 @@ nv50_disp_tiled(struct drm_crtc_state *crtc_state)
 }
 
 /* A head on two tiles borrows the phywins of its partner head
- * (coreca7d_tile_phywin()), so the partner has to stay off, and can only
- * come back on in a commit after the one that returns them.
+ * (coreca7d_tile_phywin()), so the partner has to be off.  Phywins only move
+ * between heads in a core update of their own, once the head giving them up
+ * is off in hardware: a head turned off in the same commit has its disable
+ * flushed first (nv50_disp_atomic_commit_tiles()), and a head going from two
+ * tiles to one keeps its partner off until the next commit.
+ *
+ * commit_tail() works out tile and phywin ownership from the commit alone, so
+ * every head is added to a commit with a modeset.
  */
 static int
 nv50_disp_atomic_check_tiles(struct drm_device *dev, struct drm_atomic_commit *state)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	struct drm_crtc_state *new_crtc_state, *new_pstate, *old_pstate;
+	struct nv50_disp *disp = nv50_disp(dev);
+	struct nv50_atom *atom = nv50_atom(state);
+	struct drm_crtc_state *crtc_state, *new_pstate, *old_pstate;
 	struct drm_crtc *crtc, *partner;
+	bool modeset = false;
 	int i;
 
-	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
-		const bool tiled = nv50_disp_tiled(new_crtc_state);
-		const bool enabling = new_crtc_state->enable &&
-				      drm_atomic_crtc_needs_modeset(new_crtc_state);
+	for_each_new_crtc_in_state(state, crtc, crtc_state, i)
+		modeset |= drm_atomic_crtc_needs_modeset(crtc_state);
+	if (!modeset)
+		return 0;
 
-		if (!tiled && !enabling)
-			continue;
+	drm_for_each_crtc(crtc, dev) {
+		crtc_state = drm_atomic_get_crtc_state(state, crtc);
+		if (IS_ERR(crtc_state))
+			return PTR_ERR(crtc_state);
+	}
+
+	for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+		struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+		const int head = nv50_head(crtc)->base.index;
+		const bool enabling = crtc_state->enable &&
+				      drm_atomic_crtc_needs_modeset(crtc_state);
 
 		partner = nv50_disp_tile_partner(dev, crtc);
 		if (!partner)
 			continue;
 
-		new_pstate = drm_atomic_get_crtc_state(state, partner);
-		if (IS_ERR(new_pstate))
-			return PTR_ERR(new_pstate);
+		new_pstate = drm_atomic_get_new_crtc_state(state, partner);
 		old_pstate = drm_atomic_get_old_crtc_state(state, partner);
 
-		if (tiled && new_pstate->enable) {
-			NV_ATOMIC(drm, "%s: 2 tiles need %s off\n",
-				  crtc->name, partner->name);
-			return -EINVAL;
-		}
+		if (nv50_disp_tiled(crtc_state)) {
+			/* A scaled mode needs a scaler in every tile (nvkms'
+			 * GetRequiredTileType()).
+			 */
+			if ((asyh->view.iW != asyh->view.oW ||
+			     asyh->view.iH != asyh->view.oH) &&
+			    (~disp->tile_scaler & (BIT(head) | BIT(4 + head)))) {
+				NV_ATOMIC(drm, "%s: tile %d has no scaler\n",
+					  crtc->name, 4 + head);
+				return -EINVAL;
+			}
 
-		if (enabling && (nv50_disp_tiled(new_pstate) ||
-				 nv50_disp_tiled(old_pstate))) {
-			NV_ATOMIC(drm, "%s: %s holds its phywins\n",
-				  crtc->name, partner->name);
-			return -EBUSY;
+			if (new_pstate->enable) {
+				NV_ATOMIC(drm, "%s: 2 tiles need %s off\n",
+					  crtc->name, partner->name);
+				return -EINVAL;
+			}
+
+			if (old_pstate->active)
+				atom->flush_disable = true;
+		} else if (enabling && nv50_disp_tiled(old_pstate)) {
+			if (new_pstate->active) {
+				NV_ATOMIC(drm, "%s: %s holds its phywins\n",
+					  crtc->name, partner->name);
+				return -EBUSY;
+			}
+
+			atom->flush_disable = true;
 		}
 	}
 
@@ -3259,34 +3322,6 @@ nv50_display_create(struct drm_device *dev)
 		ret = disp->core->func->caps_init(drm, disp);
 		if (ret)
 			goto out;
-	}
-
-	/* Blackwell drives a pixel clock above HEAD_CLK_CAP.PCLK_MAX (10MHz
-	 * units, clca73.h) by giving one head several tiles (HEAD_SET_TILE_MASK),
-	 * each scanning a strip of the line.  Log the tile caps: SYS_CAPC has
-	 * TILEn_EXISTS in 7:0 and TILEn_SUPPORT_MULTI_TILE in 15:8,
-	 * IHUB_COMMON_CAPF has PHYWINn_SUPPORT_MULTI_TILE, POSTCOMP_HDR_CAPA(n)
-	 * bit 18 is the tile's scaler.
-	 */
-	if (disp->disp->object.oclass >= GB202_DISP) {
-		u32 capc = nvif_rd32(&disp->caps, 0x20);
-
-		for_each_set_bit(i, &disp->disp->head_mask, ARRAY_SIZE(disp->head_max_khz)) {
-			u32 cap = nvif_rd32(&disp->caps, 0x5e8 + i * 4);
-
-			disp->head_max_khz[i] = (cap & 0xff) * 10000;
-			NV_DEBUG(drm, "head-%d: pclk %d-%d MHz\n", i,
-				 ((cap >> 8) & 0xff) * 10, (cap & 0xff) * 10);
-		}
-
-		NV_DEBUG(drm, "tiles: SYS_CAPC 0x%08x IHUB_COMMON_CAPF 0x%08x\n",
-			 capc, nvif_rd32(&disp->caps, 0x28));
-		for (i = 0; i < 8; i++) {
-			if (capc & BIT(i))
-				NV_DEBUG(drm, "tile-%d: multi-tile %d POSTCOMP_HDR_CAPA 0x%08x\n",
-					 i, !!(capc & BIT(8 + i)),
-					 nvif_rd32(&disp->caps, 0x680 + i * 32));
-		}
 	}
 
 	/* Assign the correct format modifiers */
