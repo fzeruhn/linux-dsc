@@ -478,22 +478,9 @@ r535_sor_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 	return rmapi->disp->dp.sst(sor, head, ef, watermark, hblanksym, vblanksym, tusize);
 }
 
-static int
-r535_sor_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
-{
-	const struct nvkm_rm_api *rmapi = disp->engine.subdev.device->gsp->rm->api;
-
-	/* CALCULATE_DP_IMP was only imported for r570. */
-	if (!rmapi->disp->dp.calc_imp)
-		return -ENODEV;
-
-	return rmapi->disp->dp.calc_imp(disp, params);
-}
-
 static const struct nvkm_ior_func_dp
 r535_sor_dp = {
 	.sst = r535_sor_dp_sst,
-	.calc_imp = r535_sor_dp_calc_imp,
 	.vcpi = r535_sor_dp_vcpi,
 	.audio = r535_sor_dp_audio,
 };
@@ -892,7 +879,7 @@ r535_disp_get_connect_state(struct nvkm_disp *disp, unsigned display_id)
 static int
 r535_outp_detect(struct nvkm_outp *outp)
 {
-	const struct nvkm_rm_api *rmapi = outp->disp->rm.objcom.client->gsp->rm->api;
+	const struct nvkm_rm_api *rmapi = outp->disp->engine.subdev.device->gsp->rm->api;
 	int ret;
 
 	ret = rmapi->disp->get_connect_state(outp->disp, outp->index);
@@ -993,9 +980,9 @@ r535_dp_train_target(struct nvkm_outp *outp, u8 target, bool mst, u8 link_nr, u8
 	    !(outp->dp.dpcd[DPCD_RC03] & DPCD_RC03_TPS4_SUPPORTED))
 		cmd |= NVDEF(NV0073_CTRL, DP_CMD, POST_LT_ADJ_REQ_GRANTED, YES);
 
-	/* Documented to have RM set the sink's FEC_READY before training, as
-	 * DPLib requests it; the sink ends up with it clear regardless, see
-	 * r535_dp_train().  The GPU side of FEC is r535_dp_configure_fec().
+	/* Have RM account for FEC while training, as DPLib requests it.  The
+	 * sink's FEC_READY and the GPU side of FEC are nouveau_dp_train_link()'s
+	 * (r535_dp_fec()).
 	 */
 	if (target == 0 && outp->dp.lt.fec)
 		cmd |= NVDEF(NV0073_CTRL, DP_CMD, ENABLE_FEC, TRUE);
@@ -1036,8 +1023,11 @@ r535_dp_train_target(struct nvkm_outp *outp, u8 target, bool mst, u8 link_nr, u8
 	return ret;
 }
 
+/* FEC at the GPU end of the link.  RM only turns it on or off here, after
+ * training and post-LT adjustment (NV0073_CTRL_CMD_DP_CONFIGURE_FEC).
+ */
 static int
-r535_dp_configure_fec(struct nvkm_outp *outp, bool enable)
+r535_dp_fec(struct nvkm_outp *outp, bool enable)
 {
 	NV0073_CTRL_CMD_DP_CONFIGURE_FEC_PARAMS *ctrl;
 	struct nvkm_disp *disp = outp->disp;
@@ -1054,66 +1044,13 @@ r535_dp_configure_fec(struct nvkm_outp *outp, bool enable)
 	return nvkm_gsp_rm_ctrl_wr(&disp->rm.objcom, ctrl);
 }
 
-static int r535_dp_aux_xfer(struct nvkm_outp *, u8 type, u32 addr, u8 *data, u8 *psize);
-
-/* One DPCD byte over GSP's AUX channel (types as nvkm_rdaux/nvkm_wraux). */
-static int
-r535_dp_dpcd(struct nvkm_outp *outp, bool write, u32 addr, u8 *data)
-{
-	u8 size = 1;
-
-	return r535_dp_aux_xfer(outp, write ? 8 : 9, addr, data, &size);
-}
-
 static int
 r535_dp_train(struct nvkm_outp *outp, bool retrain)
 {
-	int ret;
-
-	/* Nothing else turns FEC off again, so do it before training a link
-	 * that doesn't want it (switching from a DSC mode, or a new sink).
-	 */
-	if (!outp->dp.lt.fec && outp->dp.fec) {
-		ret = r535_dp_configure_fec(outp, false);
-		if (ret)
-			OUTP_ERR(outp, "failed to disable FEC: %d", ret);
-		outp->dp.fec = false;
-	}
-
 	for (int target = outp->dp.lttprs; target >= 0; target--) {
-		ret = r535_dp_train_target(outp, target, outp->dp.lt.mst,
-							 outp->dp.lt.nr,
-							 outp->dp.lt.bw);
-		if (ret)
-			return ret;
-	}
-
-	/* FEC goes on after training, including post-LT adjustment, which
-	 * happens in the DRM driver after this returns.
-	 */
-	if (outp->dp.lt.fec) {
-		u8 cfg = 0, status = 0;
-
-		if (outp->dp.lt.post_adj)
-			OUTP_ERR(outp, "FEC after post-LT adjustment isn't supported");
-
-		/* Training leaves the sink's FEC_READY clear even with
-		 * ENABLE_FEC, and a sink that isn't FEC-ready ignores the
-		 * FEC_DECODE_EN sequence the source sends when FEC goes on.
-		 */
-		r535_dp_dpcd(outp, false, DPCD_LC20, &cfg);
-		if (!(cfg & DPCD_LC20_FEC_READY)) {
-			cfg |= DPCD_LC20_FEC_READY;
-			r535_dp_dpcd(outp, true, DPCD_LC20, &cfg);
-			cfg = 0;
-			r535_dp_dpcd(outp, false, DPCD_LC20, &cfg);
-		}
-
-		ret = r535_dp_configure_fec(outp, true);
-		outp->dp.fec = !ret;
-		r535_dp_dpcd(outp, false, DPCD_LS80, &status);
-		OUTP_DBG(outp, "configure FEC: %d, sink FEC_READY 0x%02x status 0x%02x",
-			 ret, cfg, status);
+		int ret = r535_dp_train_target(outp, target, outp->dp.lt.mst,
+							     outp->dp.lt.nr,
+							     outp->dp.lt.bw);
 		if (ret)
 			return ret;
 	}
@@ -1236,6 +1173,18 @@ r535_dp_acquire(struct nvkm_outp *outp, bool hda)
 	return 0;
 }
 
+static int
+r535_dp_calc_imp(struct nvkm_outp *outp, struct nvkm_dp_calc_imp *params)
+{
+	const struct nvkm_rm_api *rmapi = outp->disp->engine.subdev.device->gsp->rm->api;
+
+	/* CALCULATE_DP_IMP was only imported for r570. */
+	if (!rmapi->disp->dp.calc_imp)
+		return -ENODEV;
+
+	return rmapi->disp->dp.calc_imp(outp, params);
+}
+
 static const struct nvkm_outp_func
 r535_dp = {
 	.detect = r535_outp_detect,
@@ -1249,10 +1198,13 @@ r535_dp = {
 	.dp.rates = r535_dp_rates,
 	.dp.train = r535_dp_train,
 	.dp.drive = r535_dp_drive,
+	.dp.fec = r535_dp_fec,
+	.dp.calc_imp = r535_dp_calc_imp,
 };
 
 static int
-r535_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
+r535_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm,
+		 struct nvkm_outp_dp_dsc *dsc)
 {
 	NV0073_CTRL_CMD_DP_GET_CAPS_PARAMS *ctrl;
 	int ret;
@@ -1290,6 +1242,17 @@ r535_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
 
 	*pmst = ctrl->bIsMultistreamSupported;
 	*pwm = ctrl->bHasIncreasedWatermarkLimits;
+
+	/* An RGB encoder, and FEC to carry its output (DSC over DP needs it).
+	 * Max slice width as NVIDIA's DSC library takes it from the line
+	 * buffer size (nvt_dsc_pps.c).
+	 */
+	dsc->supported = ctrl->DSC.bDscSupported && ctrl->bFECSupported &&
+			 (ctrl->DSC.encoderColorFormatMask &
+			  NV0073_CTRL_CMD_DP_GET_CAPS_DSC_ENCODER_COLOR_FORMAT_RGB);
+	dsc->max_slices = ctrl->DSC.maxNumHztSlices;
+	dsc->linebuf_depth = ctrl->DSC.lineBufferBitDepth;
+	dsc->max_slice_width = ctrl->DSC.lineBufferSizeKB * 1024;
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }
@@ -1423,9 +1386,10 @@ r535_outp_new(struct nvkm_disp *disp, u32 id)
 		if (ret)
 			return ret;
 	} else {
+		struct nvkm_outp_dp_dsc dsc = {};
 		bool mst, wm;
 
-		ret = rmapi->disp->dp.get_caps(disp, &dcbE.dpconf.link_bw, &mst, &wm);
+		ret = rmapi->disp->dp.get_caps(disp, &dcbE.dpconf.link_bw, &mst, &wm, &dsc);
 		if (ret)
 			return ret;
 
@@ -1440,6 +1404,7 @@ r535_outp_new(struct nvkm_disp *disp, u32 id)
 
 		outp->dp.mst = mst;
 		outp->dp.increased_wm = wm;
+		outp->dp.dsc = dsc;
 	}
 
 

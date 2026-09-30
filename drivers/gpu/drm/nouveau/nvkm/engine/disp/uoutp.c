@@ -93,34 +93,36 @@ nvkm_uoutp_mthd_dp_sst(struct nvkm_outp *outp, void *argv, u32 argc)
 }
 
 static int
+nvkm_uoutp_mthd_dp_fec(struct nvkm_outp *outp, void *argv, u32 argc)
+{
+	union nvif_outp_dp_fec_args *args = argv;
+
+	if (argc != sizeof(args->v0) || args->v0.version != 0)
+		return -ENOSYS;
+	if (!outp->func->dp.fec)
+		return -EINVAL;
+
+	return outp->func->dp.fec(outp, args->v0.enable);
+}
+
+static int
 nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 {
 	union nvif_outp_dp_calc_imp_args *args = argv;
-	struct nvkm_disp *disp = outp->disp;
-	struct nvkm_ior *ior = outp->ior;
 	struct nvkm_dp_calc_imp params;
 	int ret;
 
 	if (argc != sizeof(args->v0) || args->v0.version != 0)
 		return -ENOSYS;
 
-	/* This is a pure calculation, so it's also used during atomic_check,
-	 * before an OR has been acquired.  It doesn't touch the OR; any SOR
-	 * will do for finding the implementation (GSP assigns SORs itself,
-	 * so outp->info.or can't be relied on).
+	/* A pure calculation, also made from atomic_check before the output
+	 * has an OR.
 	 */
-	if (!ior)
-		ior = nvkm_ior_find(disp, SOR, -1);
-	if (!ior)
-		return -ENODEV;
-
-	if (!ior->func->dp || !ior->func->dp->calc_imp ||
-	    !nvkm_head_find(disp, args->v0.head))
+	if (!outp->func->dp.calc_imp || !nvkm_head_find(outp->disp, args->v0.head))
 		return -EINVAL;
 
 	memset(&params, 0, sizeof(params));
 	params.head = args->v0.head;
-	params.display_id = outp->index;
 	params.slice_count = args->v0.slice_count;
 	params.slice_width = args->v0.slice_width;
 	params.slice_height = args->v0.slice_height;
@@ -141,7 +143,7 @@ nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
 	params.color_format = args->v0.color_format;
 	params.dsc_enabled = args->v0.dsc_enabled;
 
-	ret = ior->func->dp->calc_imp(disp, &params);
+	ret = outp->func->dp.calc_imp(outp, &params);
 	if (ret)
 		return ret;
 
@@ -573,6 +575,7 @@ nvkm_uoutp_mthd_acquired(struct nvkm_outp *outp, u32 mthd, void *argv, u32 argc)
 	case NVIF_OUTP_V0_DP_TRAIN     : return nvkm_uoutp_mthd_dp_train     (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_DRIVE     : return nvkm_uoutp_mthd_dp_drive     (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_SST       : return nvkm_uoutp_mthd_dp_sst       (outp, argv, argc);
+	case NVIF_OUTP_V0_DP_FEC       : return nvkm_uoutp_mthd_dp_fec       (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_ID_GET: return nvkm_uoutp_mthd_dp_mst_id_get(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_ID_PUT: return nvkm_uoutp_mthd_dp_mst_id_put(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_VCPI  : return nvkm_uoutp_mthd_dp_mst_vcpi  (outp, argv, argc);
@@ -704,6 +707,10 @@ nvkm_uoutp_new(const struct nvkm_oclass *oclass, void *argv, u32 argc, struct nv
 			args->v0.proto = NVIF_OUTP_V0_PROTO_DP;
 			args->v0.dp.mst = outp->dp.mst;
 			args->v0.dp.increased_wm = outp->dp.increased_wm;
+			args->v0.dp.dsc = outp->dp.dsc.supported;
+			args->v0.dp.dsc_max_slices = outp->dp.dsc.max_slices;
+			args->v0.dp.dsc_linebuf_depth = outp->dp.dsc.linebuf_depth;
+			args->v0.dp.dsc_max_slice_width = outp->dp.dsc.max_slice_width;
 			args->v0.dp.link_nr = outp->info.dpconf.link_nr;
 			args->v0.dp.link_bw = outp->info.dpconf.link_bw * 27000;
 			break;

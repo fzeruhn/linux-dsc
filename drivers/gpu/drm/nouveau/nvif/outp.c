@@ -96,6 +96,20 @@ nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym,
 }
 
 int
+nvif_outp_dp_fec(struct nvif_outp *outp, bool enable)
+{
+	struct nvif_outp_dp_fec_v0 args = {};
+	int ret;
+
+	args.version = 0;
+	args.enable = enable;
+
+	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_FEC, &args, sizeof(args));
+	NVIF_ERRON(ret, &outp->object, "[DP_FEC enable:%d]", args.enable);
+	return ret;
+}
+
+int
 nvif_outp_dp_calc_imp(struct nvif_outp *outp, struct nvif_outp_dp_calc_imp_v0 *args)
 {
 	int ret;
@@ -559,6 +573,10 @@ nvif_outp_ctor(struct nvif_disp *disp, const char *name, int id, struct nvif_out
 		outp->info.dp.increased_wm = args.dp.increased_wm;
 		outp->info.dp.link_nr = args.dp.link_nr;
 		outp->info.dp.link_bw = args.dp.link_bw;
+		outp->info.dp.dsc.supported = args.dp.dsc;
+		outp->info.dp.dsc.max_slices = args.dp.dsc_max_slices;
+		outp->info.dp.dsc.linebuf_depth = args.dp.dsc_linebuf_depth;
+		outp->info.dp.dsc.max_slice_width = args.dp.dsc_max_slice_width;
 		break;
 	default:
 		WARN_ON(1);

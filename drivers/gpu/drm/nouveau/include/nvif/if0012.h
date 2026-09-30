@@ -36,6 +36,11 @@ union nvif_outp_args {
 				__u8  increased_wm;
 				__u8  link_nr;
 				__u32 link_bw;
+				__u8  dsc;
+				__u8  dsc_max_slices;
+				__u8  dsc_linebuf_depth;
+				__u8  pad11;
+				__u32 dsc_max_slice_width;
 			} dp;
 		};
 	} v0;
@@ -70,6 +75,7 @@ union nvif_outp_args {
 #define NVIF_OUTP_V0_DP_MST_ID_PUT 0x77
 #define NVIF_OUTP_V0_DP_MST_VCPI   0x78
 #define NVIF_OUTP_V0_DP_CALC_IMP   0x79
+#define NVIF_OUTP_V0_DP_FEC        0x7a
 
 union nvif_outp_detect_args {
 	struct nvif_outp_detect_v0 {
@@ -266,6 +272,14 @@ union nvif_outp_dp_sst_args {
 		__u32 hblanksym;
 		__u32 vblanksym;
 		__u32 tusize;
+	} v0;
+};
+
+union nvif_outp_dp_fec_args {
+	struct nvif_outp_dp_fec_v0 {
+		__u8  version;
+		__u8  enable;
+		__u8  pad02[6];
 	} v0;
 };
 

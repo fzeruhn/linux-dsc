@@ -137,9 +137,10 @@ r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 }
 
 static int
-r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
+r570_dp_calc_imp(struct nvkm_outp *outp, struct nvkm_dp_calc_imp *params)
 {
 	NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *ctrl;
+	struct nvkm_disp *disp = outp->disp;
 	int ret;
 
 	ctrl = nvkm_gsp_rm_ctrl_get(&disp->rm.objcom,
@@ -148,7 +149,7 @@ r570_dp_calc_imp(struct nvkm_disp *disp, struct nvkm_dp_calc_imp *params)
 		return PTR_ERR(ctrl);
 
 	ctrl->subDeviceInstance = 0;
-	ctrl->displayId = BIT(params->display_id);
+	ctrl->displayId = BIT(outp->index);
 	ctrl->headIndex = params->head;
 	ctrl->linkConfig.linkRate10M = params->link_rate_10m;
 	ctrl->linkConfig.laneCount = params->lane_count;
@@ -211,7 +212,8 @@ r570_dp_set_indexed_link_rates(struct nvkm_outp *outp)
 }
 
 static int
-r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
+r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm,
+		 struct nvkm_outp_dp_dsc *dsc)
 {
 	NV0073_CTRL_CMD_DP_GET_CAPS_PARAMS *ctrl;
 	int ret;
@@ -249,13 +251,17 @@ r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
 
 	*pmst = ctrl->bIsMultistreamSupported;
 	*pwm = ctrl->bHasIncreasedWatermarkLimits;
-	nvkm_debug(&disp->engine.subdev,
-		   "DSC: supported %d formats 0x%x linebuf %dKB/%dbit ratebuf %dKB\n",
-		   ctrl->DSC.bDscSupported, ctrl->DSC.encoderColorFormatMask,
-		   ctrl->DSC.lineBufferSizeKB, ctrl->DSC.lineBufferBitDepth,
-		   ctrl->DSC.rateBufferSizeKB);
-	nvkm_debug(&disp->engine.subdev, "DSC: bpp precision %d max slices %d\n",
-		   ctrl->DSC.bitsPerPixelPrecision, ctrl->DSC.maxNumHztSlices);
+
+	/* An RGB encoder, and FEC to carry its output (DSC over DP needs it).
+	 * Max slice width as NVIDIA's DSC library takes it from the line
+	 * buffer size (nvt_dsc_pps.c).
+	 */
+	dsc->supported = ctrl->DSC.bDscSupported && ctrl->bFECSupported &&
+			 (ctrl->DSC.encoderColorFormatMask &
+			  NV0073_CTRL_CMD_DP_GET_CAPS_DSC_ENCODER_COLOR_FORMAT_RGB);
+	dsc->max_slices = ctrl->DSC.maxNumHztSlices;
+	dsc->linebuf_depth = ctrl->DSC.lineBufferBitDepth;
+	dsc->max_slice_width = ctrl->DSC.lineBufferSizeKB * 1024;
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }

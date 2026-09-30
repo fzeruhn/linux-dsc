@@ -38,6 +38,14 @@ struct nvkm_outp {
 			bool mst;
 			bool increased_wm;
 
+			/* GPU DSC encoder (NV0073_CTRL_CMD_DP_GET_CAPS) */
+			struct nvkm_outp_dp_dsc {
+				bool supported;
+				u8   max_slices;
+				u8   linebuf_depth;
+				u32  max_slice_width;
+			} dsc;
+
 			struct nvkm_i2c_aux *aux;
 
 			bool enabled;
@@ -62,8 +70,6 @@ struct nvkm_outp {
 				bool fec;
 			} lt;
 
-			/* FEC is on at the GPU end of the link */
-			bool fec;
 		} dp;
 	};
 
@@ -92,6 +98,41 @@ void nvkm_outp_release_or(struct nvkm_outp *, u8 user);
 int nvkm_outp_bl_get(struct nvkm_outp *);
 int nvkm_outp_bl_set(struct nvkm_outp *, int level);
 
+/* CALCULATE_DP_IMP inputs and SST watermark outputs (nvif_outp_dp_calc_imp_v0) */
+struct nvkm_dp_calc_imp {
+	int    head;
+	/* DSC params */
+	u32    slice_count;
+	u32    slice_width;
+	u32    slice_height;
+	u32    dsc_version_major;
+	u32    dsc_version_minor;
+	/* Link config */
+	u32    link_rate_10m;
+	u32    lane_count;
+	bool   enhanced_framing;
+	/* Modeset info */
+	u32    raster_width;
+	u32    raster_height;
+	u32    surface_width;
+	u32    surface_height;
+	u32    raster_blank_start_x;
+	u32    raster_blank_end_x;
+	u32    depth;
+	u32    pixel_frequency_khz;
+	u32    bits_per_component;
+	u32    color_format;
+	bool   dsc_enabled;
+	/* Watermark (out) */
+	u32    water_mark;
+	u32    tu_size;
+	u32    min_h_blank;
+	u32    h_blank_sym;
+	u32    v_blank_sym;
+	u32    effective_bpp;
+	bool   mode_possible;
+};
+
 struct nvkm_outp_func {
 	void *(*dtor)(struct nvkm_outp *);
 	void (*init)(struct nvkm_outp *);
@@ -117,6 +158,8 @@ struct nvkm_outp_func {
 		int (*drive)(struct nvkm_outp *, u8 lanes, u8 pe[4], u8 vs[4]);
 		int (*mst_id_get)(struct nvkm_outp *, u32 *id);
 		int (*mst_id_put)(struct nvkm_outp *, u32 id);
+		int (*fec)(struct nvkm_outp *, bool enable);
+		int (*calc_imp)(struct nvkm_outp *, struct nvkm_dp_calc_imp *);
 	} dp;
 };
 

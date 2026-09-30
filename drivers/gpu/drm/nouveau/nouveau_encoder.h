@@ -102,8 +102,12 @@ struct nouveau_encoder {
 				bool mst;
 				u8   nr;
 				u32  bw;
-				bool fec;
+				/* DSC stream, so the link has FEC */
+				bool dsc;
 			} lt;
+
+			/* FEC is on at the GPU end of the link */
+			bool fec;
 
 			/* Protects DP state that needs to be accessed outside
 			 * connector reprobing contexts
@@ -164,15 +168,23 @@ enum nouveau_dp_status {
 	NOUVEAU_DP_MST,
 };
 
+/* Percentage of the link a stream gets with FEC on: RM has clients allow 3%
+ * for FEC (NV0073_CTRL_DP_CMD_ENABLE_FEC), a little more than the 2.4% that
+ * drm_dp_bw_overhead() works out for 8b/10b.
+ */
+#define NOUVEAU_DP_FEC_PCT 97
+
 struct drm_dsc_config;
+u32 nouveau_dp_dsc_slice_mask(struct nouveau_encoder *,
+			      const struct drm_display_mode *);
 int nouveau_dp_dsc_compute_config(struct nouveau_encoder *,
 				  const struct drm_display_mode *,
-				  u8 bpc, u16 bpp_x16, struct drm_dsc_config *);
+				  u8 bpc, u16 bpp_x16, int ntiles,
+				  struct drm_dsc_config *);
 
 int nouveau_dp_detect(struct nouveau_connector *, struct nouveau_encoder *);
 bool nouveau_dp_train(struct nouveau_encoder *, bool mst, u32 khz, u8 bpc,
 		      u16 dsc_bpp_x16);
-void nouveau_dp_dsc_enable(struct nouveau_encoder *, bool enable);
 u8 nouveau_dp_dsc_input_bpc(struct nouveau_encoder *, u8 max_bpc);
 void nouveau_dp_power_down(struct nouveau_encoder *);
 bool nouveau_dp_link_check(struct nouveau_connector *);

@@ -405,15 +405,15 @@ nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *c
 }
 
 /* Compressed bpp (in 1/16 bpp) for a DSC stream: the highest bpp that the
- * DRM rate-control tables cover (8, 10, 12, 15), is at most 2:1, and fits
- * the link with ~3% headroom.  0 if even 8bpp won't fit.
+ * DRM rate-control tables cover (8, 10, 12, 15), compresses at least 2:1, and
+ * fits the link with FEC.  0 if even 8bpp won't fit.
  */
 static u32
 nv50_dp_dsc_bpp_x16(struct nouveau_encoder *outp, u32 clock, u8 bpc)
 {
 	static const u8 bpps[] = { 15, 12, 10, 8 };
 	u32 max_x16 = div_u64((u64)outp->dp.link_nr * outp->dp.link_bw *
-			      8 * 16 * 97, clock * 100);
+			      8 * 16 * NOUVEAU_DP_FEC_PCT, clock * 100);
 
 	for (int i = 0; i < ARRAY_SIZE(bpps); i++) {
 		if (bpps[i] * 16 <= max_x16 && bpps[i] * 2 <= bpc * 3)
@@ -434,8 +434,9 @@ nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
 {
 	struct drm_display_mode mode;
 
+	/* Same raster as nv50_head_atomic_check_mode() programs */
 	drm_mode_copy(&mode, adjusted_mode);
-	drm_mode_set_crtcinfo(&mode, CRTC_INTERLACE_HALVE_V);
+	drm_mode_set_crtcinfo(&mode, CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
 
 	memset(imp, 0, sizeof(*imp));
 	imp->head = head;
@@ -451,12 +452,11 @@ nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
 	imp->raster_height = mode.crtc_vtotal;
 	imp->surface_width = mode.crtc_hdisplay;
 	imp->surface_height = mode.crtc_vdisplay;
-	/* Same raster convention as nv50_head_atomic_check_mode(). */
 	imp->raster_blank_end_x = mode.crtc_hblank_end - mode.crtc_hsync_start - 1;
 	imp->raster_blank_start_x = imp->raster_blank_end_x + mode.crtc_hdisplay;
 	/* compressed depth, in 1/16 bpp like bits_per_pixel */
 	imp->depth = dsc->bits_per_pixel;
-	imp->pixel_frequency_khz = mode.clock;
+	imp->pixel_frequency_khz = mode.crtc_clock;
 	imp->bits_per_component = dsc->bits_per_component;
 	imp->color_format = 0; /* RGB */
 	imp->dsc_enabled = true;
@@ -498,6 +498,27 @@ nv50_outp_atomic_check_tiles(struct drm_encoder *encoder,
 	}
 
 	return 0;
+}
+
+/* Highest pixel clock any head can reach, through as many tiles as it can
+ * take (nv50_outp_atomic_check_tiles()), or 0 if there's no known limit.
+ */
+u32
+nv50_display_max_pclk_khz(struct drm_device *dev)
+{
+	struct nv50_disp *disp = nv50_disp(dev);
+	u32 max_khz = 0;
+	int i;
+
+	for_each_set_bit(i, &disp->disp->head_mask, ARRAY_SIZE(disp->head_max_khz)) {
+		const int tiles = (disp->tile_heads & BIT(i)) ? 2 : 1;
+
+		if (!disp->head_max_khz[i])
+			return 0;
+		max_khz = max(max_khz, disp->head_max_khz[i] * tiles);
+	}
+
+	return max_khz;
 }
 
 /* Modes that only fit the link compressed: build the DSC config, check it
@@ -551,19 +572,12 @@ nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
 		return -EINVAL;
 	}
 
-	ret = nouveau_dp_dsc_compute_config(outp, mode, bpc, bpp_x16, dsc);
+	ret = nouveau_dp_dsc_compute_config(outp, mode, bpc, bpp_x16, ntiles, dsc);
 	if (ret) {
-		NV_ATOMIC(drm, "%s: no DSC config for %dx%d %dbpc -> %d/16bpp: %d\n",
-			  encoder->name, mode->hdisplay, mode->vdisplay,
-			  bpc, bpp_x16, ret);
+		NV_ATOMIC(drm, "%s: no DSC for %dx%d %dbpc->%d/16bpp, %d tile(s), slices %x: %d\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay, bpc, bpp_x16,
+			  ntiles, nouveau_dp_dsc_slice_mask(outp, mode), ret);
 		return ret;
-	}
-
-	/* Each tile compresses whole slices, at most 4 (GetTileWidth()). */
-	if (dsc->slice_count % ntiles || dsc->slice_count / ntiles > 4) {
-		NV_ATOMIC(drm, "%s: %d DSC slices don't split across %d tiles\n",
-			  encoder->name, dsc->slice_count, ntiles);
-		return -EINVAL;
 	}
 
 	ret = nv50_dp_dsc_calc_imp(outp, head, mode, dsc, &imp);
@@ -2043,8 +2057,6 @@ nv50_sor_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *st
 		nvif_outp_lvds(&nv_encoder->outp, lvds_dual, lvds_8bpc);
 		break;
 	case DCB_OUTPUT_DP:
-		/* The sink decompresses from before link training on. */
-		nouveau_dp_dsc_enable(nv_encoder, asyh->or.dsc);
 		if (!nouveau_dp_train(nv_encoder, false, mode->clock, asyh->or.bpc,
 				      asyh->or.dsc ? asyh->dsc.bits_per_pixel : 0))
 			NV_ERROR(drm, "%s: link training failed\n", encoder->name);

@@ -176,8 +176,8 @@ coreca7d_tile_prepare(struct nv50_core *core, const int *ntiles,
 
 /* Give an active head its tiles and its windows their phywins, and split
  * the active width across the tiles in tile order: tile head gets width0
- * pixels.  Returns 1 if the assignment changed, or -EBUSY if a phywin it
- * needs is still attached to another head's window.
+ * pixels.  Returns 1 if the assignment changed, -EBUSY if a phywin it needs
+ * is still attached to another head's window.
  */
 static int
 coreca7d_tile_set(struct nv50_core *core, const int *ntiles, const bool *active,
@@ -187,7 +187,7 @@ coreca7d_tile_set(struct nv50_core *core, const int *ntiles, const bool *active,
 	const u8 tiles = ntiles[head] > 1 ? BIT(head) | BIT(4 + head) : BIT(head);
 	u32 phywin[2], others = 0;
 	bool changed;
-	int i;
+	int ret, i;
 
 	for (i = 0; i < 2; i++)
 		phywin[i] = coreca7d_tile_phywin(ntiles, active, head * 2 + i);
@@ -203,8 +203,9 @@ coreca7d_tile_set(struct nv50_core *core, const int *ntiles, const bool *active,
 		  core->phywin[head * 2] != phywin[0] ||
 		  core->phywin[head * 2 + 1] != phywin[1];
 
-	if (PUSH_WAIT(push, 10 + 2 * 5))
-		return -EBUSY;
+	ret = PUSH_WAIT(push, 10 + 2 * 5);
+	if (ret)
+		return ret;
 
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_TILE_MASK(head), tiles);
 	for (i = 0; i < 2; i++) {
@@ -261,9 +262,11 @@ coreca7d_init(struct nv50_core *core)
 		core->tiles[i] = BIT(i);
 	}
 
-	/* Tiles 4-7 have no head of their own here but default to heads 4-7;
-	 * clear that so coreca7d_tile_set() can hand them out.  A tile owned
-	 * by two heads is an XID 56 (EvoInitWindowMappingCA()).
+	/* The hardware defaults tile n to head n, and a tile owned by two
+	 * heads is an XID 56 or a display engine hang (nvkms'
+	 * EvoInitWindowMappingCA(), which clears the defaults of every head it
+	 * isn't driving).  Tiles 4-7 have no head of their own here, so clear
+	 * theirs, and coreca7d_tile_set() can hand them out.
 	 */
 	for (; i < 8; i++) {
 		PUSH_MTHD(push, NVCA7D, HEAD_SET_TILE_MASK(i), 0);

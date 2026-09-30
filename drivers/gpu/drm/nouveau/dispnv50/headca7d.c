@@ -282,6 +282,7 @@ headca7d_dsc(struct nv50_head *head, struct nv50_head_atom *asyh)
 	struct nvif_push *push = &head->disp->core->chan.push;
 	const struct drm_dsc_config *dsc = &asyh->dsc;
 	struct drm_dsc_picture_parameter_set pps;
+	struct dp_sdp_header sdp;
 	const int i = head->base.index;
 	u32 data[32];
 	int ret;
@@ -309,7 +310,7 @@ headca7d_dsc(struct nv50_head *head, struct nv50_head_atom *asyh)
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_CONTROL(i),
 		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, ENABLE, TRUE) |
 		  NVVAL(NVCA7D, HEAD_SET_DSC_CONTROL, FLATNESS_DET_THRESH,
-			2 << (max_t(u8, dsc->bits_per_component, 8) - 8)) |
+			drm_dsc_flatness_det_thresh(dsc)) |
 		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, FULL_ICH_ERR_PRECISION, ENABLE) |
 		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, AUTO_RESET, DISABLE) |
 		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, FORCE_ICH_RESET, TRUE),
@@ -322,14 +323,13 @@ headca7d_dsc(struct nv50_head *head, struct nv50_head_atom *asyh)
 
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_PPS_DATA0(i), data, ARRAY_SIZE(data));
 
-	/* The DP secondary-data packet header for a PPS (DP 1.4 2.2.5.9.1):
-	 * SDP ID 0, type 0x10, 128 bytes of payload.
-	 */
+	/* The DP secondary-data packet header for a PPS (DP 1.4 2.2.5.9.1) */
+	drm_dsc_dp_pps_header_init(&sdp);
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_PPS_HEAD(i),
-		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE0, 0x00) |
-		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE1, 0x10) |
-		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE2, 0x7f) |
-		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE3, 0x00));
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE0, sdp.HB0) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE1, sdp.HB1) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE2, sdp.HB2) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE3, sdp.HB3));
 	return 0;
 }
 

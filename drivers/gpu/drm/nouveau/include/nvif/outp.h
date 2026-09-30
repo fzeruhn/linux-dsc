@@ -45,6 +45,13 @@ struct nvif_outp {
 				bool increased_wm;
 				u8   link_nr;
 				u32  link_bw;
+				/* GPU DSC encoder */
+				struct {
+					bool supported;
+					u8   max_slices;
+					u8   linebuf_depth;
+					u32  max_slice_width;
+				} dsc;
 			} dp;
 		};
 	} info;
@@ -111,6 +118,7 @@ int nvif_outp_dp_drive(struct nvif_outp *, u8 link_nr, u8 pe[4], u8 vs[4]);
 int nvif_outp_dp_sst(struct nvif_outp *, int head, u32 watermark, u32 hblanksym,
 		     u32 vblanksym, u32 tusize);
 int nvif_outp_dp_calc_imp(struct nvif_outp *, struct nvif_outp_dp_calc_imp_v0 *);
+int nvif_outp_dp_fec(struct nvif_outp *, bool enable);
 int nvif_outp_dp_mst_id_get(struct nvif_outp *, u32 *id);
 int nvif_outp_dp_mst_id_put(struct nvif_outp *, u32 id);
 int nvif_outp_dp_mst_vcpi(struct nvif_outp *, int head,
