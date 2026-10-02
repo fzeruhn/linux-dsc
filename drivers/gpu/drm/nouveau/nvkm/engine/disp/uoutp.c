@@ -88,7 +88,73 @@ nvkm_uoutp_mthd_dp_sst(struct nvkm_outp *outp, void *argv, u32 argc)
 
 	return ior->func->dp->sst(ior, args->v0.head,
 				  outp->dp.dpcd[DPCD_RC02] & DPCD_RC02_ENHANCED_FRAME_CAP,
-				  args->v0.watermark, args->v0.hblanksym, args->v0.vblanksym);
+				  args->v0.watermark, args->v0.hblanksym, args->v0.vblanksym,
+				  args->v0.tusize);
+}
+
+static int
+nvkm_uoutp_mthd_dp_fec(struct nvkm_outp *outp, void *argv, u32 argc)
+{
+	union nvif_outp_dp_fec_args *args = argv;
+
+	if (argc != sizeof(args->v0) || args->v0.version != 0)
+		return -ENOSYS;
+	if (!outp->func->dp.fec)
+		return -EINVAL;
+
+	return outp->func->dp.fec(outp, args->v0.enable);
+}
+
+static int
+nvkm_uoutp_mthd_dp_calc_imp(struct nvkm_outp *outp, void *argv, u32 argc)
+{
+	union nvif_outp_dp_calc_imp_args *args = argv;
+	struct nvkm_dp_calc_imp params;
+	int ret;
+
+	if (argc != sizeof(args->v0) || args->v0.version != 0)
+		return -ENOSYS;
+
+	/* A pure calculation, also made from atomic_check before the output
+	 * has an OR.
+	 */
+	if (!outp->func->dp.calc_imp || !nvkm_head_find(outp->disp, args->v0.head))
+		return -EINVAL;
+
+	memset(&params, 0, sizeof(params));
+	params.head = args->v0.head;
+	params.slice_count = args->v0.slice_count;
+	params.slice_width = args->v0.slice_width;
+	params.slice_height = args->v0.slice_height;
+	params.dsc_version_major = args->v0.dsc_version_major;
+	params.dsc_version_minor = args->v0.dsc_version_minor;
+	params.link_rate_10m = args->v0.link_rate_10m;
+	params.lane_count = args->v0.lane_count;
+	params.enhanced_framing = args->v0.enhanced_framing;
+	params.raster_width = args->v0.raster_width;
+	params.raster_height = args->v0.raster_height;
+	params.surface_width = args->v0.surface_width;
+	params.surface_height = args->v0.surface_height;
+	params.raster_blank_start_x = args->v0.raster_blank_start_x;
+	params.raster_blank_end_x = args->v0.raster_blank_end_x;
+	params.depth = args->v0.depth;
+	params.pixel_frequency_khz = args->v0.pixel_frequency_khz;
+	params.bits_per_component = args->v0.bits_per_component;
+	params.color_format = args->v0.color_format;
+	params.dsc_enabled = args->v0.dsc_enabled;
+
+	ret = outp->func->dp.calc_imp(outp, &params);
+	if (ret)
+		return ret;
+
+	args->v0.water_mark = params.water_mark;
+	args->v0.tu_size = params.tu_size;
+	args->v0.min_h_blank = params.min_h_blank;
+	args->v0.h_blank_sym = params.h_blank_sym;
+	args->v0.v_blank_sym = params.v_blank_sym;
+	args->v0.effective_bpp = params.effective_bpp;
+	args->v0.mode_possible = params.mode_possible;
+	return 0;
 }
 
 static int
@@ -121,6 +187,7 @@ nvkm_uoutp_mthd_dp_train(struct nvkm_outp *outp, void *argv, u32 argc)
 		outp->dp.lt.bw = args->v0.link_bw / 27000;
 		outp->dp.lt.mst = args->v0.mst;
 		outp->dp.lt.post_adj = args->v0.post_lt_adj;
+		outp->dp.lt.fec = args->v0.fec;
 	}
 
 	return outp->func->dp.train(outp, args->v0.retrain);
@@ -508,6 +575,7 @@ nvkm_uoutp_mthd_acquired(struct nvkm_outp *outp, u32 mthd, void *argv, u32 argc)
 	case NVIF_OUTP_V0_DP_TRAIN     : return nvkm_uoutp_mthd_dp_train     (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_DRIVE     : return nvkm_uoutp_mthd_dp_drive     (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_SST       : return nvkm_uoutp_mthd_dp_sst       (outp, argv, argc);
+	case NVIF_OUTP_V0_DP_FEC       : return nvkm_uoutp_mthd_dp_fec       (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_ID_GET: return nvkm_uoutp_mthd_dp_mst_id_get(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_ID_PUT: return nvkm_uoutp_mthd_dp_mst_id_put(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_MST_VCPI  : return nvkm_uoutp_mthd_dp_mst_vcpi  (outp, argv, argc);
@@ -532,6 +600,7 @@ nvkm_uoutp_mthd_noacquire(struct nvkm_outp *outp, u32 mthd, void *argv, u32 argc
 	case NVIF_OUTP_V0_DP_AUX_PWR : return nvkm_uoutp_mthd_dp_aux_pwr (outp, argv, argc);
 	case NVIF_OUTP_V0_DP_AUX_XFER: return nvkm_uoutp_mthd_dp_aux_xfer(outp, argv, argc);
 	case NVIF_OUTP_V0_DP_RATES   : return nvkm_uoutp_mthd_dp_rates   (outp, argv, argc);
+	case NVIF_OUTP_V0_DP_CALC_IMP: return nvkm_uoutp_mthd_dp_calc_imp(outp, argv, argc);
 	default:
 		break;
 	}
@@ -638,6 +707,10 @@ nvkm_uoutp_new(const struct nvkm_oclass *oclass, void *argv, u32 argc, struct nv
 			args->v0.proto = NVIF_OUTP_V0_PROTO_DP;
 			args->v0.dp.mst = outp->dp.mst;
 			args->v0.dp.increased_wm = outp->dp.increased_wm;
+			args->v0.dp.dsc = outp->dp.dsc.supported;
+			args->v0.dp.dsc_max_slices = outp->dp.dsc.max_slices;
+			args->v0.dp.dsc_linebuf_depth = outp->dp.dsc.linebuf_depth;
+			args->v0.dp.dsc_max_slice_width = outp->dp.dsc.max_slice_width;
 			args->v0.dp.link_nr = outp->info.dpconf.link_nr;
 			args->v0.dp.link_bw = outp->info.dpconf.link_bw * 27000;
 			break;

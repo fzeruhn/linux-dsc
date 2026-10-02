@@ -31,5 +31,6 @@
 #include "nouveau_reg.h"
 
 int  nv50_display_create(struct drm_device *);
+u32  nv50_display_max_pclk_khz(struct drm_device *);
 
 #endif /* __NV50_DISPLAY_H__ */

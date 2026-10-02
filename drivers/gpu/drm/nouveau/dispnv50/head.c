@@ -72,6 +72,8 @@ nv50_head_flush_set(struct nv50_head *head, struct nv50_head_atom *asyh)
 
 	if (asyh->set.view   ) head->func->view    (head, asyh);
 	if (asyh->set.mode   ) head->func->mode    (head, asyh);
+	if (asyh->set.dsc && head->func->dsc)
+		head->func->dsc(head, asyh);
 	if (asyh->set.core   ) head->func->core_set(head, asyh);
 	if (asyh->set.base   ) head->func->base    (head, asyh);
 	if (asyh->set.ovly   ) head->func->ovly    (head, asyh);
@@ -327,6 +329,7 @@ nv50_head_atomic_check_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 	asyh->or.nvsync = !!(mode->flags & DRM_MODE_FLAG_NVSYNC);
 	asyh->set.or = head->func->or != NULL;
 	asyh->set.mode = true;
+	asyh->set.dsc = head->func->dsc != NULL;
 }
 
 static int
@@ -408,6 +411,12 @@ nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *state)
 		asyh->ovly.cpp = 0;
 	}
 
+	/* Tiles only change with a modeset (coreca7d_tile_set()). */
+	if (drm_atomic_crtc_needs_modeset(&asyh->state))
+		asyh->tile.count = max_t(u8, asyh->or.tiles, 1);
+	else
+		asyh->tile.count = armh->tile.count;
+
 	if (!drm_atomic_crtc_needs_modeset(&asyh->state)) {
 		if (asyh->core.visible) {
 			if (memcmp(&armh->core, &asyh->core, sizeof(asyh->core)))
@@ -485,6 +494,8 @@ nv50_head_atomic_duplicate_state(struct drm_crtc *crtc)
 	asyh->procamp = armh->procamp;
 	asyh->crc = armh->crc;
 	asyh->or = armh->or;
+	asyh->tile = armh->tile;
+	asyh->dsc = armh->dsc;
 	asyh->dp = armh->dp;
 	asyh->clr.mask = 0;
 	asyh->set.mask = 0;

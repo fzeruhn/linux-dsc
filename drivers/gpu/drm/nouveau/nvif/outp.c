@@ -76,7 +76,8 @@ nvif_outp_dp_mst_id_get(struct nvif_outp *outp, u32 *id)
 }
 
 int
-nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym, u32 vblanksym)
+nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym,
+		 u32 vblanksym, u32 tusize)
 {
 	struct nvif_outp_dp_sst_v0 args;
 	int ret;
@@ -86,10 +87,40 @@ nvif_outp_dp_sst(struct nvif_outp *outp, int head, u32 watermark, u32 hblanksym,
 	args.watermark = watermark;
 	args.hblanksym = hblanksym;
 	args.vblanksym = vblanksym;
+	args.tusize = tusize;
 	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_SST, &args, sizeof(args));
 	NVIF_ERRON(ret, &outp->object,
-		   "[DP_SST head:%d watermark:%d hblanksym:%d vblanksym:%d]",
-		   args.head, args.watermark, args.hblanksym, args.vblanksym);
+		   "[DP_SST head:%d watermark:%d hblanksym:%d vblanksym:%d tusize:%d]",
+		   args.head, args.watermark, args.hblanksym, args.vblanksym, args.tusize);
+	return ret;
+}
+
+int
+nvif_outp_dp_fec(struct nvif_outp *outp, bool enable)
+{
+	struct nvif_outp_dp_fec_v0 args = {};
+	int ret;
+
+	args.version = 0;
+	args.enable = enable;
+
+	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_FEC, &args, sizeof(args));
+	NVIF_ERRON(ret, &outp->object, "[DP_FEC enable:%d]", args.enable);
+	return ret;
+}
+
+int
+nvif_outp_dp_calc_imp(struct nvif_outp *outp, struct nvif_outp_dp_calc_imp_v0 *args)
+{
+	int ret;
+
+	args->version = 0;
+
+	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_CALC_IMP, args, sizeof(*args));
+	NVIF_ERRON(ret, &outp->object,
+		   "[DP_CALC_IMP head:%d slices:%d water_mark:%d tu_size:%d possible:%d]",
+		   args->head, args->slice_count, args->water_mark, args->tu_size,
+		   args->mode_possible);
 	return ret;
 }
 
@@ -111,9 +142,10 @@ nvif_outp_dp_drive(struct nvif_outp *outp, u8 link_nr, u8 pe[4], u8 vs[4])
 
 int
 nvif_outp_dp_train(struct nvif_outp *outp, u8 dpcd[DP_RECEIVER_CAP_SIZE], u8 lttprs,
-		   u8 link_nr, u32 link_bw, bool mst, bool post_lt_adj, bool retrain)
+		   u8 link_nr, u32 link_bw, bool mst, bool post_lt_adj, bool fec,
+		   bool retrain)
 {
-	struct nvif_outp_dp_train_v0 args;
+	struct nvif_outp_dp_train_v0 args = {};
 	int ret;
 
 	args.version = 0;
@@ -122,14 +154,15 @@ nvif_outp_dp_train(struct nvif_outp *outp, u8 dpcd[DP_RECEIVER_CAP_SIZE], u8 ltt
 	args.lttprs = lttprs;
 	args.post_lt_adj = post_lt_adj;
 	args.link_nr = link_nr;
+	args.fec = fec;
 	args.link_bw = link_bw;
 	memcpy(args.dpcd, dpcd, sizeof(args.dpcd));
 
 	ret = nvif_object_mthd(&outp->object, NVIF_OUTP_V0_DP_TRAIN, &args, sizeof(args));
 	NVIF_ERRON(ret, &outp->object,
-		   "[DP_TRAIN retrain:%d mst:%d lttprs:%d post_lt_adj:%d nr:%d bw:%d]",
-		   args.retrain, args.mst, args.lttprs, args.post_lt_adj, args.link_nr,
-		   args.link_bw);
+		   "[DP_TRAIN retrain:%d mst:%d lttprs:%d post_lt_adj:%d fec:%d nr:%d bw:%d]",
+		   args.retrain, args.mst, args.lttprs, args.post_lt_adj, args.fec,
+		   args.link_nr, args.link_bw);
 	return ret;
 }
 
@@ -540,6 +573,10 @@ nvif_outp_ctor(struct nvif_disp *disp, const char *name, int id, struct nvif_out
 		outp->info.dp.increased_wm = args.dp.increased_wm;
 		outp->info.dp.link_nr = args.dp.link_nr;
 		outp->info.dp.link_bw = args.dp.link_bw;
+		outp->info.dp.dsc.supported = args.dp.dsc;
+		outp->info.dp.dsc.max_slices = args.dp.dsc_max_slices;
+		outp->info.dp.dsc.linebuf_depth = args.dp.dsc_linebuf_depth;
+		outp->info.dp.dsc.max_slice_width = args.dp.dsc_max_slice_width;
 		break;
 	default:
 		WARN_ON(1);

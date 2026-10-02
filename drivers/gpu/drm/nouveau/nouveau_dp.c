@@ -23,17 +23,24 @@
  */
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/display/drm_dsc_helper.h>
 
 #include "nouveau_drv.h"
 #include "nouveau_connector.h"
 #include "nouveau_encoder.h"
 #include "nouveau_crtc.h"
+#include "nv50_display.h"
 
+#include <nvif/class.h>
 #include <nvif/if0011.h>
 
 MODULE_PARM_DESC(mst, "Enable DisplayPort multi-stream (default: enabled)");
 static int nouveau_mst = 1;
 module_param_named(mst, nouveau_mst, int, 0400);
+
+MODULE_PARM_DESC(dsc, "Enable DisplayPort DSC on GB20x (experimental, default: disabled)");
+static int nouveau_dsc;
+module_param_named(dsc, nouveau_dsc, int, 0400);
 
 static bool
 nouveau_dp_has_sink_count(struct drm_connector *connector,
@@ -122,6 +129,30 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 				outp->dp.rate[j].rate = rate;
 				outp->dp.rate_nr++;
 			}
+		}
+	}
+
+	/* Only GB20x heads can compress (headca7d_dsc()), and only RGB, which
+	 * both ends have to support.  DSC over DP needs FEC, which
+	 * nouveau_dp_train() always enables with it.
+	 */
+	outp->dp.dsc.supported = false;
+	if (nouveau_dsc && dpcd[DP_DPCD_REV] >= DP_DPCD_REV_14 &&
+	    outp->outp.info.dp.dsc.supported &&
+	    nouveau_display(connector->dev)->disp.object.oclass >= GB202_DISP) {
+		u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
+		u8 fec = 0;
+
+		ret = drm_dp_dpcd_read(aux, DP_DSC_SUPPORT, dsc_dpcd,
+				       DP_DSC_RECEIVER_CAP_SIZE);
+		if (ret == DP_DSC_RECEIVER_CAP_SIZE &&
+		    drm_dp_dpcd_readb(aux, DP_FEC_CAPABILITY, &fec) == 1) {
+			NV_DEBUG(nouveau_drm(connector->dev), "%s: DSC caps %*ph FEC 0x%02x\n",
+				 connector->name, DP_DSC_RECEIVER_CAP_SIZE, dsc_dpcd, fec);
+			outp->dp.dsc.supported = drm_dp_sink_supports_dsc(dsc_dpcd) &&
+						 drm_dp_sink_supports_fec(fec) &&
+						 (dsc_dpcd[DP_DSC_DEC_COLOR_FORMAT_CAP -
+							   DP_DSC_SUPPORT] & DP_DSC_RGB);
 		}
 	}
 
@@ -297,6 +328,61 @@ out:
 	return ret;
 }
 
+/* Set or clear DSC decompression (DP_DSC_ENABLE) and FEC_READY in the sink,
+ * which it takes at link training, as i915 does: DSC over DP needs FEC.  Set
+ * for every training, since a sink that lost power has lost them too; only
+ * cleared if set, so sinks without DSC see no writes.  Failing to clear them
+ * is expected from a sink that has gone away.
+ */
+static void
+nouveau_dp_sink_dsc(struct nouveau_encoder *outp, bool enable)
+{
+	struct nouveau_drm *drm = nouveau_drm(outp->base.base.dev);
+	struct drm_dp_aux *aux = &outp->conn->aux;
+	int ret, fec;
+
+	if (!enable && !outp->dp.dsc.enabled)
+		return;
+
+	ret = drm_dp_dpcd_writeb(aux, DP_DSC_ENABLE, enable ? DP_DECOMPRESSION_EN : 0);
+	fec = drm_dp_dpcd_writeb(aux, DP_FEC_CONFIGURATION, enable ? DP_FEC_READY : 0);
+	if (enable && (ret != 1 || fec != 1))
+		NV_ERROR(drm, "%s: failed to enable sink DSC: %d %d\n",
+			 outp->base.base.name, ret, fec);
+	else if (ret != 1 || fec != 1)
+		NV_DEBUG(drm, "%s: failed to disable sink DSC: %d %d\n",
+			 outp->base.base.name, ret, fec);
+
+	outp->dp.dsc.enabled = enable;
+}
+
+/* FEC goes on at the GPU once the link is trained, including post-LT
+ * adjustment, as DPLib does (NV0073_CTRL_CMD_DP_CONFIGURE_FEC).
+ */
+static int
+nouveau_dp_fec_enable(struct nouveau_encoder *outp)
+{
+	struct nouveau_drm *drm = nouveau_drm(outp->base.base.dev);
+	struct drm_dp_aux *aux = &outp->conn->aux;
+	u8 cfg, status = 0;
+	int ret;
+
+	/* GSP's training leaves the sink's FEC_READY clear, and a sink that
+	 * isn't FEC-ready ignores the FEC_DECODE_EN sequence the GPU sends.
+	 */
+	if (drm_dp_dpcd_readb(aux, DP_FEC_CONFIGURATION, &cfg) == 1 &&
+	    !(cfg & DP_FEC_READY))
+		drm_dp_dpcd_writeb(aux, DP_FEC_CONFIGURATION, cfg | DP_FEC_READY);
+
+	ret = nvif_outp_dp_fec(&outp->outp, true);
+	outp->dp.fec = ret == 0;
+
+	drm_dp_dpcd_readb(aux, DP_FEC_STATUS, &status);
+	NV_DEBUG(drm, "%s: FEC on: %d, sink FEC_STATUS 0x%02x\n",
+		 outp->base.base.name, ret, status);
+	return ret;
+}
+
 void
 nouveau_dp_power_down(struct nouveau_encoder *outp)
 {
@@ -305,6 +391,8 @@ nouveau_dp_power_down(struct nouveau_encoder *outp)
 	u8 pwr;
 
 	mutex_lock(&outp->dp.hpd_irq_lock);
+
+	nouveau_dp_sink_dsc(outp, false);
 
 	ret = drm_dp_dpcd_readb(aux, DP_SET_POWER, &pwr);
 	if (ret == 1) {
@@ -328,6 +416,16 @@ nouveau_dp_train_link(struct nouveau_encoder *outp, bool retrain)
 	    !(outp->dp.dpcd[DP_MAX_DOWNSPREAD] & DP_TPS4_SUPPORTED))
 	    post_lt = true;
 
+	/* The GPU's FEC is off while the link trains.  Unlike DPLib, which
+	 * leaves that to the link power-down, nouveau turns it off here.
+	 */
+	if (outp->dp.fec) {
+		nvif_outp_dp_fec(&outp->outp, false);
+		outp->dp.fec = false;
+	}
+
+	nouveau_dp_sink_dsc(outp, outp->dp.lt.dsc);
+
 retry:
 	ret = nvif_outp_dp_train(&outp->outp, outp->dp.dpcd,
 					      outp->dp.lttpr.nr,
@@ -335,6 +433,7 @@ retry:
 					      outp->dp.lt.bw,
 					      outp->dp.lt.mst,
 					      post_lt,
+					      outp->dp.lt.dsc,
 					      retrain);
 	if (ret)
 		return false;
@@ -398,11 +497,15 @@ retry:
 	if (ret == 1 && retries++ < 3)
 		goto retry;
 
+	if (ret == 0 && outp->dp.lt.dsc)
+		ret = nouveau_dp_fec_enable(outp);
+
 	return ret == 0;
 }
 
 bool
-nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc)
+nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc,
+		 u16 dsc_bpp_x16)
 {
 	struct nouveau_drm *drm = nouveau_drm(outp->base.base.dev);
 	struct drm_dp_aux *aux = &outp->conn->aux;
@@ -412,6 +515,9 @@ nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc)
 
 	if (mst)
 		min_rate = outp->dp.link_nr * outp->dp.rate[0].rate;
+	else if (dsc_bpp_x16)
+		min_rate = DIV_ROUND_UP((u64)khz * dsc_bpp_x16 * 100,
+					8 * 16 * NOUVEAU_DP_FEC_PCT);
 	else
 		min_rate = DIV_ROUND_UP(khz * bpc * 3, 8);
 
@@ -434,6 +540,7 @@ nouveau_dp_train(struct nouveau_encoder *outp, bool mst, u32 khz, u8 bpc)
 				outp->dp.lt.nr = nr;
 				outp->dp.lt.bw = outp->dp.rate[rate].rate;
 				outp->dp.lt.mst = mst;
+				outp->dp.lt.dsc = dsc_bpp_x16 != 0;
 				if (nouveau_dp_train_link(outp, false))
 					goto done;
 			}
@@ -519,6 +626,147 @@ nouveau_dp_irq(struct work_struct *work)
 	nouveau_connector_hpd(nv_connector, NVIF_CONN_EVENT_V0_IRQ | hpd);
 }
 
+/* Deepest input bpc, up to max_bpc, that the sink's DSC decoder takes.
+ * 0 if none.
+ */
+u8
+nouveau_dp_dsc_input_bpc(struct nouveau_encoder *outp, u8 max_bpc)
+{
+	u8 bpcs[3], bpc = 0;
+	int i, nr;
+
+	nr = drm_dp_dsc_sink_supported_input_bpcs(outp->dp.dsc.dsc_dpcd, bpcs);
+	for (i = 0; i < nr; i++) {
+		if (bpcs[i] <= max_bpc)
+			bpc = max(bpc, bpcs[i]);
+	}
+
+	return bpc;
+}
+
+/* Slice counts, as drm_dp_dsc_slice_count_to_mask() bits, that both the sink
+ * and the GPU take for mode: slices within both's max slice width and the
+ * sink's per-slice throughput, and, as i915 and AMD require, a whole number
+ * of pixels wide.  0 if there are none.
+ */
+u32
+nouveau_dp_dsc_slice_mask(struct nouveau_encoder *outp,
+			  const struct drm_display_mode *mode)
+{
+	const u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
+	const u32 sink_mask = drm_dp_dsc_sink_slice_count_mask(dsc_dpcd, false);
+	const int throughput =
+		drm_dp_dsc_sink_max_slice_throughput(dsc_dpcd, mode->clock, true);
+	const u32 max_count = min_t(u32, outp->outp.info.dp.dsc.max_slices, 24);
+	const u32 max_slice_width = min(drm_dp_dsc_sink_max_slice_width(dsc_dpcd),
+					outp->outp.info.dp.dsc.max_slice_width);
+	u32 count, mask = 0;
+
+	if (max_slice_width < DP_DSC_MIN_SLICE_WIDTH_VALUE)
+		return 0;
+
+	count = DIV_ROUND_UP(mode->hdisplay, max_slice_width);
+	if (throughput > 0)
+		count = max_t(u32, count, DIV_ROUND_UP(mode->clock, throughput));
+
+	for (; count <= max_count; count++) {
+		if (!(mode->hdisplay % count))
+			mask |= sink_mask & drm_dp_dsc_slice_count_to_mask(count);
+	}
+
+	return mask;
+}
+
+/* drm_dsc_compute_rc_parameters() truncates scale_increment_interval into
+ * its 16-bit PPS field, which happens when slices are too tall.  Same checks
+ * as NVIDIA's DSC_PpsCalcScaleInterval().
+ */
+static bool
+nouveau_dp_dsc_scale_valid(const struct drm_dsc_config *cfg)
+{
+	u32 final_scale = 8 * cfg->rc_model_size /
+			  (cfg->rc_model_size - cfg->final_offset);
+
+	if (final_scale > 63)
+		return false;
+
+	if (final_scale > 9 &&
+	    ((u32)cfg->final_offset << 11) /
+	    ((final_scale - 9) * (cfg->nfl_bpg_offset + cfg->slice_bpg_offset)) > 0xffff)
+		return false;
+
+	return cfg->scale_decrement_interval >= 1 &&
+	       cfg->scale_decrement_interval <= DSC_SCALE_DECREMENT_INTERVAL_MAX;
+}
+
+/* Fill in the DSC config (the PPS contents) for compressing mode from bpc to
+ * bpp_x16 (1/16 bpp) across ntiles tiles.  Slices are as few as the sink and
+ * GPU allow, split evenly across the tiles, at most 4 per tile
+ * (nvkms' GetTileWidth()).  Slice height is the tallest vdisplay / 1..16 whose
+ * rate-control parameters fit the PPS, as NVIDIA's Dsc_PpsCalcHeight() does
+ * for DP.
+ */
+int
+nouveau_dp_dsc_compute_config(struct nouveau_encoder *outp,
+			      const struct drm_display_mode *mode,
+			      u8 bpc, u16 bpp_x16, int ntiles,
+			      struct drm_dsc_config *cfg)
+{
+	const u8 *dsc_dpcd = outp->dp.dsc.dsc_dpcd;
+	const u8 rev = dsc_dpcd[DP_DSC_REV - DP_DSC_SUPPORT];
+	const u32 mask = nouveau_dp_dsc_slice_mask(outp, mode);
+	u32 slice_count;
+	int ret;
+
+	for (slice_count = ntiles; slice_count <= 4 * ntiles; slice_count += ntiles) {
+		if (mask & drm_dp_dsc_slice_count_to_mask(slice_count))
+			break;
+	}
+
+	if (slice_count > 4 * ntiles)
+		return -EINVAL;
+
+	memset(cfg, 0, sizeof(*cfg));
+	cfg->dsc_version_major = 1;
+	cfg->dsc_version_minor = min_t(u8, (rev & DP_DSC_MINOR_MASK) >>
+					   DP_DSC_MINOR_SHIFT, 2);
+	cfg->pic_width = mode->hdisplay;
+	cfg->pic_height = mode->vdisplay;
+	cfg->slice_count = slice_count;
+	cfg->slice_width = mode->hdisplay / slice_count;
+	cfg->bits_per_component = bpc;
+	cfg->bits_per_pixel = bpp_x16;
+	cfg->convert_rgb = true;
+	cfg->line_buf_depth = min_t(u8, drm_dp_dsc_sink_line_buf_depth(dsc_dpcd),
+				    outp->outp.info.dp.dsc.linebuf_depth);
+	cfg->block_pred_enable =
+		dsc_dpcd[DP_DSC_BLK_PREDICTION_SUPPORT - DP_DSC_SUPPORT] &
+		DP_DSC_BLK_PREDICTION_IS_SUPPORTED;
+
+	if (cfg->line_buf_depth < 8)
+		return -EINVAL;
+
+	drm_dsc_set_const_params(cfg);
+	drm_dsc_set_rc_buf_thresh(cfg);
+	ret = drm_dsc_setup_rc_params(cfg, DRM_DSC_1_2_444);
+	if (ret)
+		return ret;
+
+	for (int i = 1; i <= 16 && mode->vdisplay / i >= 8; i++) {
+		if (mode->vdisplay % i)
+			continue;
+
+		cfg->slice_height = mode->vdisplay / i;
+		/* compute_rc_parameters() may lower it for narrow slices */
+		cfg->initial_scale_value = drm_dsc_initial_scale_value(cfg);
+		if (!drm_dsc_compute_rc_parameters(cfg) &&
+		    nouveau_dp_dsc_scale_valid(cfg))
+			return 0;
+	}
+
+	return -ERANGE;
+}
+
 /* TODO:
  * - Validate against the DP caps advertised by the GPU (we don't check these
  *   yet)
@@ -529,12 +777,12 @@ nv50_dp_mode_valid(struct nouveau_encoder *outp,
 		   unsigned *out_clock)
 {
 	const unsigned int min_clock = 25000;
-	unsigned int max_rate, mode_rate, ds_max_dotclock, clock = mode->clock;
+	unsigned int max_rate, mode_rate, ds_max_dotclock, max_clock, clock = mode->clock;
 	/* Check with the minmum bpc always, so we can advertise better modes.
 	 * In particlar not doing this causes modes to be dropped on HDR
 	 * displays as we might check with a bpc of 16 even.
 	 */
-	const u8 bpp = 6 * 3;
+	u8 bpp = 6 * 3;
 
 	if (mode->flags & DRM_MODE_FLAG_INTERLACE && !outp->caps.dp_interlace)
 		return MODE_NO_INTERLACE;
@@ -543,8 +791,24 @@ nv50_dp_mode_valid(struct nouveau_encoder *outp,
 		clock *= 2;
 
 	max_rate = outp->dp.link_nr * outp->dp.link_bw;
+
+	/* A sink with DSC can take the mode compressed down to 8bpp, the
+	 * lowest nv50_dp_dsc_bpp_x16() picks, over a link with FEC;
+	 * nv50_outp_atomic_check_dsc() validates it with GSP.  MST streams
+	 * aren't compressed yet.
+	 */
+	if (outp->dp.dsc.supported && !(outp->dp.mstm && outp->dp.mstm->is_mst)) {
+		bpp = 8;
+		max_rate = max_rate / 100 * NOUVEAU_DP_FEC_PCT;
+	}
+
 	mode_rate = DIV_ROUND_UP(clock * bpp, 8);
 	if (mode_rate > max_rate)
+		return MODE_CLOCK_HIGH;
+
+	/* Past what a head reaches through its tiles */
+	max_clock = nv50_display_max_pclk_khz(outp->base.base.dev);
+	if (max_clock && clock > max_clock)
 		return MODE_CLOCK_HIGH;
 
 	ds_max_dotclock = drm_dp_downstream_max_dotclock(outp->dp.dpcd, outp->dp.downstream_ports);

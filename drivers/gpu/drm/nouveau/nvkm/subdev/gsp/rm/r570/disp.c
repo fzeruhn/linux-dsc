@@ -109,7 +109,7 @@ r570_dp_vcpi(struct nvkm_ior *sor, int head, u8 slot, u8 slot_nr, u16 pbn, u16 a
 
 static int
 r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
-	    u32 watermark, u32 hblanksym, u32 vblanksym)
+	    u32 watermark, u32 hblanksym, u32 vblanksym, u32 tusize)
 {
 	struct nvkm_disp *disp = sor->disp;
 	NV0073_CTRL_CMD_DP_CONFIG_STREAM_PARAMS *ctrl;
@@ -130,10 +130,64 @@ r570_dp_sst(struct nvkm_ior *sor, int head, bool ef,
 	ctrl->colorFormat = 0;
 	ctrl->bEnableTwoHeadOneOr = 0;
 	ctrl->SST.bEnhancedFraming = ef;
-	ctrl->SST.tuSize = 64;
+	ctrl->SST.tuSize = tusize;
 	ctrl->SST.waterMark = watermark;
 	ctrl->SST.bEnableAudioOverRightPanel = 0;
 	return nvkm_gsp_rm_ctrl_wr(&disp->rm.objcom, ctrl);
+}
+
+static int
+r570_dp_calc_imp(struct nvkm_outp *outp, struct nvkm_dp_calc_imp *params)
+{
+	NV0073_CTRL_CMD_CALCULATE_DP_IMP_PARAMS *ctrl;
+	struct nvkm_disp *disp = outp->disp;
+	int ret;
+
+	ctrl = nvkm_gsp_rm_ctrl_get(&disp->rm.objcom,
+				    NV0073_CTRL_CMD_CALCULATE_DP_IMP, sizeof(*ctrl));
+	if (IS_ERR(ctrl))
+		return PTR_ERR(ctrl);
+
+	ctrl->subDeviceInstance = 0;
+	ctrl->displayId = BIT(outp->index);
+	ctrl->headIndex = params->head;
+	ctrl->linkConfig.linkRate10M = params->link_rate_10m;
+	ctrl->linkConfig.laneCount = params->lane_count;
+	ctrl->linkConfig.bEnhancedFraming = params->enhanced_framing;
+	/* DSC over 8b/10b SST needs FEC (nvkms enables it with DSC) */
+	ctrl->linkConfig.bFECEnabled = params->dsc_enabled;
+	ctrl->modesetInfo.rasterWidth = params->raster_width;
+	ctrl->modesetInfo.rasterHeight = params->raster_height;
+	ctrl->modesetInfo.surfaceWidth = params->surface_width;
+	ctrl->modesetInfo.surfaceHeight = params->surface_height;
+	ctrl->modesetInfo.rasterBlankStartX = params->raster_blank_start_x;
+	ctrl->modesetInfo.rasterBlankEndX = params->raster_blank_end_x;
+	ctrl->modesetInfo.depth = params->depth;
+	ctrl->modesetInfo.pixelFrequencyKHz = params->pixel_frequency_khz;
+	ctrl->modesetInfo.bitsPerComponent = params->bits_per_component;
+	ctrl->modesetInfo.colorFormat = params->color_format;
+	ctrl->modesetInfo.bDSCEnabled = params->dsc_enabled;
+	ctrl->dscInfo.sliceCount = params->slice_count;
+	ctrl->dscInfo.sliceWidth = params->slice_width;
+	ctrl->dscInfo.sliceHeight = params->slice_height;
+	ctrl->dscInfo.dscVersionMajor = params->dsc_version_major;
+	ctrl->dscInfo.dscVersionMinor = params->dsc_version_minor;
+
+	ret = nvkm_gsp_rm_ctrl_push(&disp->rm.objcom, &ctrl, sizeof(*ctrl));
+	if (ret) {
+		nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
+		return ret;
+	}
+
+	params->water_mark = ctrl->watermark.waterMark;
+	params->tu_size = ctrl->watermark.tuSize;
+	params->min_h_blank = ctrl->watermark.minHBlank;
+	params->h_blank_sym = ctrl->watermark.hBlankSym;
+	params->v_blank_sym = ctrl->watermark.vBlankSym;
+	params->effective_bpp = ctrl->watermark.effectiveBpp;
+	params->mode_possible = ctrl->watermark.bIsModePossible;
+	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
+	return 0;
 }
 
 static int
@@ -158,7 +212,8 @@ r570_dp_set_indexed_link_rates(struct nvkm_outp *outp)
 }
 
 static int
-r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
+r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm,
+		 struct nvkm_outp_dp_dsc *dsc)
 {
 	NV0073_CTRL_CMD_DP_GET_CAPS_PARAMS *ctrl;
 	int ret;
@@ -196,6 +251,17 @@ r570_dp_get_caps(struct nvkm_disp *disp, int *plink_bw, bool *pmst, bool *pwm)
 
 	*pmst = ctrl->bIsMultistreamSupported;
 	*pwm = ctrl->bHasIncreasedWatermarkLimits;
+
+	/* An RGB encoder, and FEC to carry its output (DSC over DP needs it).
+	 * Max slice width as NVIDIA's DSC library takes it from the line
+	 * buffer size (nvt_dsc_pps.c).
+	 */
+	dsc->supported = ctrl->DSC.bDscSupported && ctrl->bFECSupported &&
+			 (ctrl->DSC.encoderColorFormatMask &
+			  NV0073_CTRL_CMD_DP_GET_CAPS_DSC_ENCODER_COLOR_FORMAT_RGB);
+	dsc->max_slices = ctrl->DSC.maxNumHztSlices;
+	dsc->linebuf_depth = ctrl->DSC.lineBufferBitDepth;
+	dsc->max_slice_width = ctrl->DSC.lineBufferSizeKB * 1024;
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return 0;
 }
@@ -319,6 +385,7 @@ r570_disp = {
 		.set_indexed_link_rates = r570_dp_set_indexed_link_rates,
 		.sst = r570_dp_sst,
 		.vcpi = r570_dp_vcpi,
+		.calc_imp = r570_dp_calc_imp,
 	},
 	.chan = {
 		.set_pushbuf = r570_disp_chan_set_pushbuf,

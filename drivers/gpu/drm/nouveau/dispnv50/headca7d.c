@@ -10,6 +10,10 @@
 
 #include <nvhw/class/clca7d.h>
 
+#include <drm/display/drm_dsc_helper.h>
+
+#include <linux/unaligned.h>
+
 static int
 headca7d_display_id(struct nv50_head *head, u32 display_id)
 {
@@ -219,10 +223,11 @@ headca7d_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 {
 	struct nvif_push *push = &head->disp->core->chan.push;
 	struct nv50_head_mode *m = &asyh->mode;
+	const u64 hz = (u64)m->clock * 1000;
 	const int i = head->base.index;
 	int ret;
 
-	ret = PUSH_WAIT(push, 11);
+	ret = PUSH_WAIT(push, 14);
 	if (ret)
 		return ret;
 
@@ -245,12 +250,86 @@ headca7d_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_CONTROL(i),
 		  NVDEF(NVCA7D, HEAD_SET_CONTROL, STRUCTURE, PROGRESSIVE));
 
+	/* The FREQUENCY methods carry only 31 HERTZ bits; the upper bits
+	 * of anything past 2.147GHz live in the HI methods
+	 * (EvoSetRasterParams9()). Truncating would scan out at pclk modulo 2^31.
+	 */
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY(i),
-		  NVVAL(NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY, HERTZ, m->clock * 1000));
+		  NVVAL(NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY, HERTZ,
+			(u32)(hz & 0x7fffffff)));
 
 	PUSH_MTHD(push, NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX(i),
-		  NVVAL(NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX, HERTZ, m->clock * 1000));
+		  NVVAL(NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX, HERTZ,
+			(u32)(hz & 0x7fffffff)));
 
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_HI(i),
+		  NVVAL(NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_HI, HERTZ,
+			(u32)(hz >> 31)),
+
+				HEAD_SET_PIXEL_CLOCK_FREQUENCY_HI_MAX(i),
+		  NVVAL(NVCA7D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_HI_MAX, HERTZ,
+			(u32)(hz >> 31)));
+
+	return 0;
+}
+
+/* Program the head's DSC engine and the PPS it sends in each vblank, as
+ * nvkms does for DP (EvoSetDpDscParamsC9()).  GSP doesn't do any of this.
+ */
+static int
+headca7d_dsc(struct nv50_head *head, struct nv50_head_atom *asyh)
+{
+	struct nvif_push *push = &head->disp->core->chan.push;
+	const struct drm_dsc_config *dsc = &asyh->dsc;
+	struct drm_dsc_picture_parameter_set pps;
+	struct dp_sdp_header sdp;
+	const int i = head->base.index;
+	u32 data[32];
+	int ret;
+
+	BUILD_BUG_ON(sizeof(pps) != sizeof(data));
+
+	ret = PUSH_WAIT(push, 3 + 33 + 2);
+	if (ret)
+		return ret;
+
+	if (!asyh->or.dsc) {
+		PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_CONTROL(i),
+			  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, ENABLE, FALSE),
+
+					HEAD_SET_DSC_PPS_CONTROL(i),
+			  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, ENABLE, FALSE));
+		return 0;
+	}
+
+	/* HEAD_SET_DSC_PPS_DATA0 holds PPS bytes 0-3, byte 0 in bits 7:0 */
+	drm_dsc_pps_payload_pack(&pps, dsc);
+	for (int j = 0; j < ARRAY_SIZE(data); j++)
+		data[j] = get_unaligned_le32((u8 *)&pps + j * 4);
+
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_CONTROL(i),
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, ENABLE, TRUE) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_CONTROL, FLATNESS_DET_THRESH,
+			drm_dsc_flatness_det_thresh(dsc)) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, FULL_ICH_ERR_PRECISION, ENABLE) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, AUTO_RESET, DISABLE) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_CONTROL, FORCE_ICH_RESET, TRUE),
+
+				HEAD_SET_DSC_PPS_CONTROL(i),
+		  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, ENABLE, TRUE) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, LOCATION, VSYNC) |
+		  NVDEF(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, FREQUENCY, EVERY_FRAME) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_CONTROL, SIZE, 0x1f)); /* dwords - 1 */
+
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_PPS_DATA0(i), data, ARRAY_SIZE(data));
+
+	/* The DP secondary-data packet header for a PPS (DP 1.4 2.2.5.9.1) */
+	drm_dsc_dp_pps_header_init(&sdp);
+	PUSH_MTHD(push, NVCA7D, HEAD_SET_DSC_PPS_HEAD(i),
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE0, sdp.HB0) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE1, sdp.HB1) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE2, sdp.HB2) |
+		  NVVAL(NVCA7D, HEAD_SET_DSC_PPS_HEAD, BYTE3, sdp.HB3));
 	return 0;
 }
 
@@ -294,4 +373,5 @@ headca7d = {
 	.or = headca7d_or,
 	.static_wndw_map = headc37d_static_wndw_map,
 	.display_id = headca7d_display_id,
+	.dsc = headca7d_dsc,
 };

@@ -2,6 +2,7 @@
 #define __NV50_KMS_ATOM_H__
 #define nv50_atom(p) container_of((p), struct nv50_atom, state)
 #include <drm/drm_atomic.h>
+#include <drm/display/drm_dsc.h>
 #include "crc.h"
 
 struct nouveau_encoder;
@@ -120,7 +121,19 @@ struct nv50_head_atom {
 		u8 depth:4;
 		u8 crc_raster:2;
 		u8 bpc;
+		/* stream is DSC-compressed (nv50_outp_atomic_check_dsc()) */
+		bool dsc;
+		/* tiles the output needs (DSC above HEAD_CLK_CAP) */
+		u8 tiles;
 	} or;
+
+	/* tiles the head scans out through (coreca7d_tile_set()) */
+	struct {
+		u8 count;
+	} tile;
+
+	/* PPS contents when or.dsc, from nv50_outp_atomic_check_dsc() */
+	struct drm_dsc_config dsc;
 
 	struct nv50_crc_atom crc;
 
@@ -143,6 +156,7 @@ struct nv50_head_atom {
 			bool procamp:1;
 			bool crc:1;
 			bool or:1;
+			bool dsc:1;
 		};
 		u16 mask;
 	} set, clr;

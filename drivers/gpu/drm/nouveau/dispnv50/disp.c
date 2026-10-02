@@ -35,6 +35,7 @@
 #include <linux/iopoll.h>
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/display/drm_dsc_helper.h>
 #include <drm/display/drm_scdc_helper.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -403,6 +404,209 @@ nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *c
 	}
 }
 
+/* Compressed bpp (in 1/16 bpp) for a DSC stream: the highest bpp that the
+ * DRM rate-control tables cover (8, 10, 12, 15), compresses at least 2:1, and
+ * fits the link with FEC.  0 if even 8bpp won't fit.
+ */
+static u32
+nv50_dp_dsc_bpp_x16(struct nouveau_encoder *outp, u32 clock, u8 bpc)
+{
+	static const u8 bpps[] = { 15, 12, 10, 8 };
+	u32 max_x16 = div_u64((u64)outp->dp.link_nr * outp->dp.link_bw *
+			      8 * 16 * NOUVEAU_DP_FEC_PCT, clock * 100);
+
+	for (int i = 0; i < ARRAY_SIZE(bpps); i++) {
+		if (bpps[i] * 16 <= max_x16 && bpps[i] * 2 <= bpc * 3)
+			return bpps[i] * 16;
+	}
+
+	return 0;
+}
+
+/* Ask GSP (CALCULATE_DP_IMP) whether the link can carry mode as the DSC
+ * stream described by dsc, and for the SST watermark parameters to use.
+ */
+static int
+nv50_dp_dsc_calc_imp(struct nouveau_encoder *outp, int head,
+		     const struct drm_display_mode *adjusted_mode,
+		     const struct drm_dsc_config *dsc,
+		     struct nvif_outp_dp_calc_imp_v0 *imp)
+{
+	struct drm_display_mode mode;
+
+	/* Same raster as nv50_head_atomic_check_mode() programs */
+	drm_mode_copy(&mode, adjusted_mode);
+	drm_mode_set_crtcinfo(&mode, CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
+
+	memset(imp, 0, sizeof(*imp));
+	imp->head = head;
+	imp->slice_count = dsc->slice_count;
+	imp->slice_width = dsc->slice_width;
+	imp->slice_height = dsc->slice_height;
+	imp->dsc_version_major = dsc->dsc_version_major;
+	imp->dsc_version_minor = dsc->dsc_version_minor;
+	imp->link_rate_10m = outp->dp.link_bw / 1000;
+	imp->lane_count = outp->dp.link_nr;
+	imp->enhanced_framing = outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP;
+	imp->raster_width = mode.crtc_htotal;
+	imp->raster_height = mode.crtc_vtotal;
+	imp->surface_width = mode.crtc_hdisplay;
+	imp->surface_height = mode.crtc_vdisplay;
+	imp->raster_blank_end_x = mode.crtc_hblank_end - mode.crtc_hsync_start - 1;
+	imp->raster_blank_start_x = imp->raster_blank_end_x + mode.crtc_hdisplay;
+	/* compressed depth, in 1/16 bpp like bits_per_pixel */
+	imp->depth = dsc->bits_per_pixel;
+	imp->pixel_frequency_khz = mode.crtc_clock;
+	imp->bits_per_component = dsc->bits_per_component;
+	imp->color_format = 0; /* RGB */
+	imp->dsc_enabled = true;
+
+	return nvif_outp_dp_calc_imp(&outp->outp, imp);
+}
+
+/* Tiles the head needs to reach the mode's pixel clock, assuming
+ * HEAD_CLK_CAP is a per-tile limit.  NVIDIA asks RM IMP instead
+ * (IS_MODE_POSSIBLE).  Only GB20x reports a limit; elsewhere this is 1.
+ */
+static int
+nv50_outp_atomic_check_tiles(struct drm_encoder *encoder,
+			     struct drm_crtc_state *crtc_state)
+{
+	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+	struct nv50_disp *disp = nv50_disp(encoder->dev);
+	const int head = nv50_head(crtc_state->crtc)->base.index;
+	u32 max_khz = disp->head_max_khz[head];
+	int max_tiles;
+
+	asyh->or.tiles = 1;
+	if (!crtc_state->enable || !max_khz)
+		return 0;
+
+	asyh->or.tiles = DIV_ROUND_UP(mode->clock, max_khz);
+
+	/* coreca7d_tile_set() pairs each head with one spare tile, if the
+	 * hardware has it (coreca7d_caps_init()).
+	 */
+	max_tiles = (disp->tile_heads & BIT(head)) ? 2 : 1;
+	if (asyh->or.tiles > max_tiles) {
+		NV_ATOMIC(nouveau_drm(encoder->dev),
+			  "%s: %dkHz needs %d tiles of %dkHz, head-%d has %d\n",
+			  encoder->name, mode->clock, asyh->or.tiles, max_khz,
+			  head, max_tiles);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/* Highest pixel clock any head can reach, through as many tiles as it can
+ * take (nv50_outp_atomic_check_tiles()), or 0 if there's no known limit.
+ */
+u32
+nv50_display_max_pclk_khz(struct drm_device *dev)
+{
+	struct nv50_disp *disp = nv50_disp(dev);
+	u32 max_khz = 0;
+	int i;
+
+	for_each_set_bit(i, &disp->disp->head_mask, ARRAY_SIZE(disp->head_max_khz)) {
+		const int tiles = (disp->tile_heads & BIT(i)) ? 2 : 1;
+
+		if (!disp->head_max_khz[i])
+			return 0;
+		max_khz = max(max_khz, disp->head_max_khz[i] * tiles);
+	}
+
+	return max_khz;
+}
+
+/* Modes that only fit the link compressed: build the DSC config, check it
+ * with GSP, and drive the mode as a DSC stream through the tiles
+ * nv50_outp_atomic_check_tiles() picked.
+ */
+static int
+nv50_outp_atomic_check_dsc(struct drm_encoder *encoder,
+			   struct drm_crtc_state *crtc_state,
+			   struct drm_connector_state *conn_state)
+{
+	struct nouveau_encoder *outp = nouveau_encoder(encoder);
+	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+	struct nouveau_drm *drm = nouveau_drm(encoder->dev);
+	const int head = nv50_head(crtc_state->crtc)->base.index;
+	const int ntiles = asyh->or.tiles;
+	struct drm_dsc_config *dsc = &asyh->dsc;
+	struct nvif_outp_dp_calc_imp_v0 imp;
+	unsigned int max_rate, mode_rate;
+	u32 bpp_x16;
+	u8 bpc, max_bpc;
+	int ret;
+
+	asyh->or.dsc = false;
+
+	if (outp->dcb->type != DCB_OUTPUT_DP || !crtc_state->enable)
+		return 0;
+
+	max_rate = outp->dp.link_nr * outp->dp.link_bw;
+	mode_rate = DIV_ROUND_UP(mode->clock * asyh->or.bpc * 3, 8);
+	if (mode_rate <= max_rate || !outp->dp.dsc.supported)
+		return 0;
+
+	/* fix_depth already gave up at 6bpc; compress from the sink's depth,
+	 * or the deepest below it that its decoder takes.
+	 */
+	max_bpc = clamp_t(u8, conn_state->connector->display_info.bpc, 8, 10);
+	bpc = nouveau_dp_dsc_input_bpc(outp, max_bpc);
+	if (!bpc) {
+		NV_ATOMIC(drm, "%s: sink DSC decoder takes none of 8-%dbpc\n",
+			  encoder->name, max_bpc);
+		return -EINVAL;
+	}
+
+	bpp_x16 = nv50_dp_dsc_bpp_x16(outp, mode->clock, bpc);
+	if (!bpp_x16) {
+		NV_ATOMIC(drm, "%s: %dx%d@%dkHz doesn't fit %dx%d even at 8bpp DSC\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay,
+			  mode->clock, outp->dp.link_nr, outp->dp.link_bw);
+		return -EINVAL;
+	}
+
+	ret = nouveau_dp_dsc_compute_config(outp, mode, bpc, bpp_x16, ntiles, dsc);
+	if (ret) {
+		NV_ATOMIC(drm, "%s: no DSC for %dx%d %dbpc->%d/16bpp, %d tile(s), slices %x: %d\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay, bpc, bpp_x16,
+			  ntiles, nouveau_dp_dsc_slice_mask(outp, mode), ret);
+		return ret;
+	}
+
+	ret = nv50_dp_dsc_calc_imp(outp, head, mode, dsc, &imp);
+	NV_ATOMIC(drm, "%s: DSC %dx%d@%dkHz %dbpc -> %d/16bpp, %d tile(s) x %d slice(s) of %dx%d\n",
+		  encoder->name, mode->hdisplay, mode->vdisplay, mode->clock,
+		  bpc, bpp_x16, ntiles, dsc->slice_count / ntiles,
+		  dsc->slice_width, dsc->slice_height);
+	NV_ATOMIC(drm, "%s: IMP on %dx%d: %d possible %d wm %d tu %d hblank %d vblank %d\n",
+		  encoder->name, outp->dp.link_nr, outp->dp.link_bw,
+		  ret, imp.mode_possible, imp.water_mark, imp.tu_size,
+		  imp.h_blank_sym, imp.v_blank_sym);
+	if (drm_debug_enabled(DRM_UT_ATOMIC)) {
+		struct drm_printer p = drm_dbg_printer(encoder->dev, DRM_UT_ATOMIC, "dsc");
+
+		drm_dsc_dump_config(&p, 1, dsc);
+	}
+
+	if (ret || !imp.mode_possible) {
+		NV_ATOMIC(drm, "%s: %dx%d doesn't fit the link as DSC either\n",
+			  encoder->name, mode->hdisplay, mode->vdisplay);
+		return -EINVAL;
+	}
+
+	/* The head and the OR carry the uncompressed pixels. */
+	asyh->or.dsc = true;
+	asyh->or.bpc = bpc;
+	return 0;
+}
+
 static int
 nv50_outp_atomic_check(struct drm_encoder *encoder,
 		       struct drm_crtc_state *crtc_state,
@@ -424,7 +628,11 @@ nv50_outp_atomic_check(struct drm_encoder *encoder,
 	/* We might have to reduce the bpc */
 	nv50_outp_atomic_fix_depth(encoder, crtc_state);
 
-	return 0;
+	ret = nv50_outp_atomic_check_tiles(encoder, crtc_state);
+	if (ret)
+		return ret;
+
+	return nv50_outp_atomic_check_dsc(encoder, crtc_state, conn_state);
 }
 
 struct nouveau_connector *
@@ -981,6 +1189,12 @@ nv50_msto_atomic_check(struct drm_encoder *encoder,
 	if (!drm_atomic_crtc_needs_modeset(crtc_state))
 		return 0;
 
+	/* MST streams aren't compressed or tiled (nv50_outp_atomic_check_dsc()),
+	 * whatever this head last drove.
+	 */
+	asyh->or.dsc = false;
+	asyh->or.tiles = 1;
+
 	/*
 	 * When restoring duplicated states, we need to make sure that the bw
 	 * remains the same and avoid recalculating it, as the connector's bpc
@@ -1051,7 +1265,7 @@ nv50_msto_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *s
 
 	if (!mstm->links++) {
 		nvif_outp_acquire_sor(&mstm->outp->outp, false /*TODO: MST audio... */);
-		nouveau_dp_train(mstm->outp, true, 0, 0);
+		nouveau_dp_train(mstm->outp, true, 0, 0, 0);
 	}
 
 	if (head->func->display_id) {
@@ -1620,7 +1834,7 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 	s32 hblank_symbols;
 	// number of link clocks per line.
 	int vblank_symbols	  = 0;
-	bool bEnableDsc = false;
+	bool bEnableDsc = asyh->or.dsc;
 	unsigned surfaceWidth = asyh->mode.h.blanks - asyh->mode.h.blanke;
 	unsigned rasterWidth = asyh->mode.h.active;
 	unsigned depth = asyh->or.bpc * 3;
@@ -1638,6 +1852,22 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 	if (outp->outp.info.dp.increased_wm) {
 		watermarkAdjust = DP_CONFIG_INCREASED_WATERMARK_ADJUST;
 		watermarkMinimum = DP_CONFIG_INCREASED_WATERMARK_LIMIT;
+	}
+
+	/* With DSC, have GSP calculate the watermark instead. */
+	if (bEnableDsc) {
+		struct nvif_outp_dp_calc_imp_v0 imp;
+		int ret;
+
+		ret = nv50_dp_dsc_calc_imp(outp, head->base.index,
+					   &asyh->state.adjusted_mode,
+					   &asyh->dsc, &imp);
+		if (ret || !imp.mode_possible)
+			return false;
+
+		return nvif_outp_dp_sst(&outp->outp, head->base.index,
+					imp.water_mark, imp.h_blank_sym,
+					imp.v_blank_sym, imp.tu_size) == 0;
 	}
 
 	if ((pixelClockHz * depth) >= (8 * minRate * outp->dp.link_nr * DSC_FACTOR))
@@ -1737,7 +1967,8 @@ nv50_sor_dp_watermark_sst(struct nouveau_encoder *outp,
 
 	vBlankSym = (vblank_symbols < 0) ? 0 : vblank_symbols;
 
-	return nvif_outp_dp_sst(&outp->outp, head->base.index, waterMark, hBlankSym, vBlankSym);
+	return nvif_outp_dp_sst(&outp->outp, head->base.index, waterMark,
+				hBlankSym, vBlankSym, tuSize) == 0;
 }
 
 static void
@@ -1826,8 +2057,12 @@ nv50_sor_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *st
 		nvif_outp_lvds(&nv_encoder->outp, lvds_dual, lvds_8bpc);
 		break;
 	case DCB_OUTPUT_DP:
-		nouveau_dp_train(nv_encoder, false, mode->clock, asyh->or.bpc);
-		nv50_sor_dp_watermark_sst(nv_encoder, head, asyh);
+		if (!nouveau_dp_train(nv_encoder, false, mode->clock, asyh->or.bpc,
+				      asyh->or.dsc ? asyh->dsc.bits_per_pixel : 0))
+			NV_ERROR(drm, "%s: link training failed\n", encoder->name);
+		if (!nv50_sor_dp_watermark_sst(nv_encoder, head, asyh))
+			NV_ERROR(drm, "%s: DP watermark setup failed\n",
+				 encoder->name);
 		depth = nv50_dp_bpc_to_depth(asyh->or.bpc);
 
 		if (nv_encoder->outp.or.link & 1)
@@ -2011,7 +2246,7 @@ nv50_pior_atomic_enable(struct drm_encoder *encoder, struct drm_atomic_commit *s
 		break;
 	case DCB_OUTPUT_DP:
 		ctrl |= NVDEF(NV507D, PIOR_SET_CONTROL, PROTOCOL, EXT_TMDS_ENC);
-		nouveau_dp_train(nv_encoder, false, asyh->state.adjusted_mode.clock, 6);
+		nouveau_dp_train(nv_encoder, false, asyh->state.adjusted_mode.clock, 6, 0);
 		break;
 	default:
 		BUG();
@@ -2165,6 +2400,95 @@ nv50_disp_atomic_commit_wndw(struct drm_atomic_commit *state, u32 *interlock)
 	}
 }
 
+/* Tiles a head scans out through; a disabled head goes back to one. */
+static int
+nv50_disp_tiles(struct drm_crtc_state *crtc_state)
+{
+	if (!crtc_state->active)
+		return 1;
+
+	return max_t(int, nv50_head_atom(crtc_state)->tile.count, 1);
+}
+
+/* Tiles and activity of heads 0-3 after the commit, and which of them the
+ * hardware may still be scanning out from (busy): those active after the
+ * commit, and, unless their disable has already been flushed, those active
+ * before it.  Every head is in a modeset commit (nv50_disp_atomic_check_tiles());
+ * false if a head isn't, i.e. for a commit without a modeset.
+ */
+static bool
+nv50_disp_tile_state(struct drm_atomic_commit *state, bool flushed,
+		     int *ntiles, bool *active, bool *busy)
+{
+	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
+	struct drm_crtc *crtc;
+
+	for (int i = 0; i < 4; i++) {
+		ntiles[i] = 1;
+		active[i] = false;
+		busy[i] = false;
+	}
+
+	drm_for_each_crtc(crtc, state->dev) {
+		const int i = nv50_head(crtc)->base.index;
+
+		if (i >= 4)
+			continue;
+
+		old_crtc_state = drm_atomic_get_old_crtc_state(state, crtc);
+		new_crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+		if (!new_crtc_state)
+			return false;
+
+		ntiles[i] = nv50_disp_tiles(new_crtc_state);
+		active[i] = new_crtc_state->active;
+		busy[i] = active[i] || (!flushed && old_crtc_state->active);
+	}
+
+	return true;
+}
+
+/* Multi-tile, part 1: lend or take back the phywins of heads that are off,
+ * in a core update of its own ahead of the ones that attach them
+ * (coreca7d_tile_prepare()).  A head turned off by this commit only counts
+ * as off once its disable has been flushed.
+ */
+static void
+nv50_disp_atomic_commit_tiles(struct drm_atomic_commit *state, bool flushed)
+{
+	struct nouveau_drm *drm = nouveau_drm(state->dev);
+	struct nv50_disp *disp = nv50_disp(state->dev);
+	struct nv50_core *core = disp->core;
+	u32 core_only[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ntiles[4];
+	bool active[4], busy[4];
+
+	if (!core->func->tile.prepare ||
+	    !nv50_disp_tile_state(state, flushed, ntiles, active, busy) ||
+	    !core->func->tile.prepare(core, ntiles, active, busy))
+		return;
+
+	NV_ATOMIC(drm, "tiles %*ph, phywins %*ph\n", 4, core->tiles, 8, core->phywin);
+	core->func->ntfy_init(disp->sync, NV50_DISP_CORE_NTFY);
+	core->func->update(core, core_only, true);
+	if (core->func->ntfy_wait_done(disp->sync, NV50_DISP_CORE_NTFY,
+				       core->chan.base.device))
+		NV_ERROR(drm, "core notifier timeout (tiles)\n");
+}
+
+/* Width of the first of ntiles tiles: whole DSC slices, as many as the other
+ * tiles or one more (GetTileWidth()), else an even split.
+ */
+static u16
+nv50_disp_tile_width0(struct nv50_head_atom *asyh, int ntiles)
+{
+	if (asyh->or.dsc)
+		return DIV_ROUND_UP(asyh->dsc.slice_count, ntiles) *
+		       asyh->dsc.slice_width;
+
+	return DIV_ROUND_UP(asyh->state.adjusted_mode.hdisplay, ntiles);
+}
+
 static void
 nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 {
@@ -2181,6 +2505,8 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	int i;
 	bool flushed = false;
+	int ntiles[4];
+	bool active[4], busy[4];
 
 	NV_ATOMIC(drm, "commit %d %d\n", atom->lock_core, atom->flush_disable);
 	nv50_crc_atomic_stop_reporting(state);
@@ -2192,6 +2518,12 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 
 	if (atom->lock_core)
 		mutex_lock(&disp->mutex);
+
+	/* Without a flush of the disables, lend phywins before anything else is
+	 * pushed; with one, after it (nv50_disp_atomic_check_tiles()).
+	 */
+	if (atom->lock_core && !atom->flush_disable)
+		nv50_disp_atomic_commit_tiles(state, false);
 
 	/* Disable head(s). */
 	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
@@ -2254,6 +2586,9 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 		}
 	}
 
+	if (atom->lock_core && atom->flush_disable)
+		nv50_disp_atomic_commit_tiles(state, flushed);
+
 	if (flushed)
 		nv50_crc_atomic_release_notifier_contexts(state);
 	nv50_crc_atomic_init_notifier_contexts(state);
@@ -2286,6 +2621,32 @@ nv50_disp_atomic_commit_tail(struct drm_atomic_commit *state)
 
 		if (asyh->set.mask) {
 			nv50_head_flush_set(head, asyh);
+			interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+		}
+
+		/* Multi-tile, part 2: attach tiles and phywins, and split the
+		 * line across the tiles.
+		 */
+		if (core->func->tile.set && new_crtc_state->active &&
+		    drm_atomic_crtc_needs_modeset(new_crtc_state) &&
+		    nv50_disp_tile_state(state, true, ntiles, active, busy)) {
+			const int h = head->base.index;
+			const u16 width = asyh->state.adjusted_mode.hdisplay;
+			u16 width0;
+			int ret;
+
+			width0 = nv50_disp_tile_width0(asyh, ntiles[h]);
+
+			ret = core->func->tile.set(core, ntiles, active, h, width0, width);
+			if (ret < 0)
+				NV_ERROR(drm, "%s: phywins for %d tile(s) still in use\n",
+					 crtc->name, ntiles[h]);
+			else if (ret || ntiles[h] > 1)
+				NV_ATOMIC(drm, "%s: tiles 0x%02x phywins 0x%02x/0x%02x width %d+%d\n",
+					  crtc->name, core->tiles[h],
+					  core->phywin[h * 2], core->phywin[h * 2 + 1],
+					  ntiles[h] > 1 ? width0 : width,
+					  ntiles[h] > 1 ? width - width0 : 0);
 			interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 		}
 
@@ -2559,6 +2920,105 @@ nv50_disp_outp_atomic_check_set(struct nv50_atom *atom,
 	return 0;
 }
 
+static struct drm_crtc *
+nv50_disp_tile_partner(struct drm_device *dev, struct drm_crtc *crtc)
+{
+	const int partner = nv50_head(crtc)->base.index ^ 2;
+	struct drm_crtc *tmp;
+
+	drm_for_each_crtc(tmp, dev) {
+		if (nv50_head(tmp)->base.index == partner)
+			return tmp;
+	}
+
+	return NULL;
+}
+
+static bool
+nv50_disp_tiled(struct drm_crtc_state *crtc_state)
+{
+	return crtc_state->active && nv50_head_atom(crtc_state)->tile.count > 1;
+}
+
+/* A head on two tiles borrows the phywins of its partner head
+ * (coreca7d_tile_phywin()), so the partner has to be off.  Phywins only move
+ * between heads in a core update of their own, once the head giving them up
+ * is off in hardware: a head turned off in the same commit has its disable
+ * flushed first (nv50_disp_atomic_commit_tiles()), and a head going from two
+ * tiles to one keeps its partner off until the next commit.
+ *
+ * commit_tail() works out tile and phywin ownership from the commit alone, so
+ * every head is added to a commit with a modeset.
+ */
+static int
+nv50_disp_atomic_check_tiles(struct drm_device *dev, struct drm_atomic_commit *state)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct nv50_disp *disp = nv50_disp(dev);
+	struct nv50_atom *atom = nv50_atom(state);
+	struct drm_crtc_state *crtc_state, *new_pstate, *old_pstate;
+	struct drm_crtc *crtc, *partner;
+	bool modeset = false;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, crtc_state, i)
+		modeset |= drm_atomic_crtc_needs_modeset(crtc_state);
+	if (!modeset)
+		return 0;
+
+	drm_for_each_crtc(crtc, dev) {
+		crtc_state = drm_atomic_get_crtc_state(state, crtc);
+		if (IS_ERR(crtc_state))
+			return PTR_ERR(crtc_state);
+	}
+
+	for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+		struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+		const int head = nv50_head(crtc)->base.index;
+		const bool enabling = crtc_state->enable &&
+				      drm_atomic_crtc_needs_modeset(crtc_state);
+
+		partner = nv50_disp_tile_partner(dev, crtc);
+		if (!partner)
+			continue;
+
+		new_pstate = drm_atomic_get_new_crtc_state(state, partner);
+		old_pstate = drm_atomic_get_old_crtc_state(state, partner);
+
+		if (nv50_disp_tiled(crtc_state)) {
+			/* A scaled mode needs a scaler in every tile (nvkms'
+			 * GetRequiredTileType()).
+			 */
+			if ((asyh->view.iW != asyh->view.oW ||
+			     asyh->view.iH != asyh->view.oH) &&
+			    (~disp->tile_scaler & (BIT(head) | BIT(4 + head)))) {
+				NV_ATOMIC(drm, "%s: tile %d has no scaler\n",
+					  crtc->name, 4 + head);
+				return -EINVAL;
+			}
+
+			if (new_pstate->enable) {
+				NV_ATOMIC(drm, "%s: 2 tiles need %s off\n",
+					  crtc->name, partner->name);
+				return -EINVAL;
+			}
+
+			if (old_pstate->active)
+				atom->flush_disable = true;
+		} else if (enabling && nv50_disp_tiled(old_pstate)) {
+			if (new_pstate->active) {
+				NV_ATOMIC(drm, "%s: %s holds its phywins\n",
+					  crtc->name, partner->name);
+				return -EBUSY;
+			}
+
+			atom->flush_disable = true;
+		}
+	}
+
+	return 0;
+}
+
 static int
 nv50_disp_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state)
 {
@@ -2597,6 +3057,12 @@ nv50_disp_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state)
 	ret = drm_atomic_helper_check(dev, state);
 	if (ret)
 		return ret;
+
+	if (core->func->tile.set) {
+		ret = nv50_disp_atomic_check_tiles(dev, state);
+		if (ret)
+			return ret;
+	}
 
 	for_each_oldnew_connector_in_state(state, connector, old_connector_state, new_connector_state, i) {
 		ret = nv50_disp_outp_atomic_check_clr(atom, old_connector_state);

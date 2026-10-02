@@ -9,6 +9,8 @@
 struct nvkm_ior;
 struct nvkm_outp;
 struct r535_gr;
+struct nvkm_dp_calc_imp;
+struct nvkm_outp_dp_dsc;
 
 struct nvkm_rm_impl {
 	const struct nvkm_rm_wpr *wpr;
@@ -92,12 +94,15 @@ struct nvkm_rm_api {
 		int (*bl_ctrl)(struct nvkm_disp *, unsigned display_id, bool set, int *val);
 
 		struct {
-			int (*get_caps)(struct nvkm_disp *, int *link_bw, bool *mst, bool *wm);
+			int (*get_caps)(struct nvkm_disp *, int *link_bw, bool *mst, bool *wm,
+					struct nvkm_outp_dp_dsc *);
 			int (*set_indexed_link_rates)(struct nvkm_outp *);
 			int (*sst)(struct nvkm_ior *, int head, bool ef,
-				   u32 watermark, u32 hblanksym, u32 vblanksym);
+				   u32 watermark, u32 hblanksym, u32 vblanksym,
+				   u32 tusize);
 			int (*vcpi)(struct nvkm_ior *, int head,
 				    u8 slot, u8 slot_nr, u16 pbn, u16 aligned_pbn);
+			int (*calc_imp)(struct nvkm_outp *, struct nvkm_dp_calc_imp *);
 		} dp;
 
 		struct {

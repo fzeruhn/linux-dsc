@@ -52,6 +52,7 @@ struct nv50_head_func {
 	int (*or)(struct nv50_head *, struct nv50_head_atom *);
 	void (*static_wndw_map)(struct nv50_head *, struct nv50_head_atom *);
 	int (*display_id)(struct nv50_head *, u32 display_id);
+	int (*dsc)(struct nv50_head *, struct nv50_head_atom *);
 };
 
 extern const struct nv50_head_func head507d;
